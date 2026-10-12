@@ -1,0 +1,14 @@
+[Unit]
+Description=Redragon M910-KS battery reading (Sino Wealth dongle)
+Documentation=https://github.com/dominikake/redragon-m910ks
+
+[Service]
+Type=oneshot
+
+# Runs as your user; the udev rule + input group grant hidraw access.
+# -B avoids writing a root-owned __pycache__ if ever run via sudo.
+ExecStart=/usr/bin/python3 -B %h/.local/share/redragon-m910ks/battery.py --retries 2
+
+# Exit 1/2 just mean "no reading right now" (dongle absent or mouse
+# asleep). That is routine, not a failure, so do not spam the journal.
+SuccessExitStatus=1 2

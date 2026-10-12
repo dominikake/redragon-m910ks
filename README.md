@@ -74,6 +74,25 @@ module running `~/.config/omarchy/bar/scripts/omarchy_bar_module.py`
 greyed when asleep. Restore the previous bar with:
 `cp ~/.config/omarchy/shell.json.bak-battery ~/.config/omarchy/shell.json`.
 
+## Background refresh (systemd timer)
+
+`./install.sh` copies the tools to `~/.local/share/redragon-m910ks/` and
+enables a user timer that re-reads every 2 minutes:
+
+```sh
+./install.sh                 # install + enable timer
+./install.sh --no-timer      # files only, no timer
+./install.sh --uninstall     # remove timer and units
+systemctl --user status redragon-battery.timer
+```
+
+Why 2 minutes: the mouse auto-sleeps after ~1 minute idle, so polling
+faster mostly returns "asleep" and burns USB traffic. Polling *does not*
+wake a sleeping mouse — forcing the link awake to get a faster reading
+would drain the very battery being measured. The timer keeps the bar fresh
+while you're actively using the mouse, and keeps the USB read off the bar's
+critical path.
+
 ## UPower bridge (optional)
 
 Publishes an `org.freedesktop.UPower.Device` on the session bus plus a
@@ -101,6 +120,8 @@ cat "$XDG_RUNTIME_DIR/redragon-m910ks-battery.txt"
 | `tools/sniff.py` | Passive listener for spontaneous reports. |
 | `docs/PROTOCOL.md` | Full findings: wire format, command table, unknowns. |
 | `docs/SETUP.md` | udev rule, group setup, troubleshooting. |
+| `install.sh` | Installs tools + the systemd user timer. |
+| `systemd/` | `redragon-battery.service` / `.timer` units. |
 
 ## Design constraints
 

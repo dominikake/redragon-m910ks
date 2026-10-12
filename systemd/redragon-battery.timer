@@ -1,0 +1,18 @@
+[Unit]
+Description=Refresh Redragon M910-KS battery reading periodically
+Documentation=https://github.com/dominikake/redragon-m910ks
+
+[Timer]
+# Start shortly after login, then every 2 minutes.
+#
+# Interval rationale: the mouse auto-sleeps after ~1 minute of inactivity,
+# so polling much faster mostly returns "asleep" and wastes USB traffic.
+# 2 minutes is frequent enough that the bar is never visibly stale while
+# you are actively using the mouse, and light enough to leave the battery
+# alone. Reading does not wake a sleeping mouse by design -- forcing the
+# link awake to poll faster would drain the very battery we are measuring.
+OnBootSec=90s
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
