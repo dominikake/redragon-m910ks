@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+
+# Local capture/log output from confirm.py and plot.py
+captures/
+
+# Local persistent reading history (tools/history.py)
+*.jsonl
+state/
+
+# Editor / OS noise
+*.swp
+.DS_Store
