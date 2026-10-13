@@ -108,6 +108,7 @@ cat "$XDG_RUNTIME_DIR/redragon-m910ks-battery.txt"
 | Path | What it is |
 |---|---|
 | `tools/sinowealth.py` | Minimal HID transport. Standard library only. |
+| `tools/safety.py` | **Read-only policy.** Refuses writes; makes `0x75` unreachable. Self-check: `python3 tools/safety.py`. |
 | `tools/battery.py` | **Main reader.** Charge % from the dongle via cmd `0x90`. |
 | `tools/history.py` | Persistent reading history + staleness tracking. |
 | `tools/plot.py` | Render the discharge curve / CSV export from history. |
@@ -154,7 +155,13 @@ Two things are worth being precise about:
 
 Command `0x75` (DFU) is never sent and has no override path. Writes require
 an explicit `allow_write=True` at the call site, so any write shows up in a
-diff. Both are enforced in code, not by convention — see #12.
+diff. Both are enforced in code by `tools/safety.py`, which every send routes
+through — not by convention.
+
+```sh
+python3 tools/safety.py                             # policy self-check, no hardware
+python3 tools/verify_vendor_cmds.py --guard-test    # adversarial, sends nothing
+```
 
 Lifting the policy requires establishing a recovery path that does not depend
 on Windows (#9) — not merely a successful read.

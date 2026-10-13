@@ -8,7 +8,8 @@ Sends ONLY the commands the RE classifies as reads:
     0x90            read power
 
 Never sends 0x12 / 0x22 / 0x32 (set matrix), 0x30 (set macro),
-0x92 (set PSD) or 0x75 (DFU). These are writes.
+0x92 (set PSD) or 0x75 (DFU). These are writes, and that is enforced by
+tools/safety.py on every send -- not merely by this list.
 
 Usage: python3 tools/verify_vendor_cmds.py [--node N]
 """
@@ -30,11 +31,12 @@ from sinowealth import (  # noqa: E402
     hexdump,
 )
 
-# reads only -- the RE marks every other command as a write.
-# The reply report id differs: short commands echo on the CMD report
-# (0x05), the 520-byte config comes back on the config report (0x08).
-# Asking 0x05 for 520 bytes makes the device stall the control transfer
-# and the kernel reports EPIPE.
+import safety  # noqa: E402
+
+# Reads only. The list is not merely a convention here: every send still goes
+# through SinoWealthDevice.set_feature_report, which consults tools/safety.py
+# and refuses anything that would write. This set is the human-readable
+# statement of intent; safety.py is what enforces it.
 READS = [
     ("0x01", 0x01, REPORT_ID_CMD, REPORT_SIZE_SHORT),
     ("0x11", 0x11, REPORT_ID_CONFIG, REPORT_SIZE_CONFIG),
@@ -42,8 +44,6 @@ READS = [
     ("0x31", 0x31, REPORT_ID_CONFIG, REPORT_SIZE_CONFIG),
     ("0x90", 0x90, REPORT_ID_CMD, REPORT_SIZE_SHORT),
 ]
-
-NEVER_SEND = {0x12, 0x22, 0x32, 0x30, 0x92, 0x75}
 
 
 def query(dev, cmd, reply_id, length, settle=0.2):
@@ -66,12 +66,58 @@ def query(dev, cmd, reply_id, length, settle=0.2):
                   if len(reply) >= 2 else "short reply")
 
 
+def guard_test(dev: SinoWealthDevice) -> int:
+    """
+    Adversarially check that the safety guard cannot be talked into sending a
+    write. Every attempt below is expected to raise before it reaches the
+    device, so this test never actually transmits anything.
+
+    The point is to exercise the real send paths -- cmd_query and
+    set_feature_report -- rather than the policy functions in isolation.
+    """
+    attempts = [
+        ("cmd_query(0x30) SetMacro", lambda: dev.cmd_query(0x30)),
+        ("cmd_query(0x12) SetMatrix p1", lambda: dev.cmd_query(0x12)),
+        ("cmd_query(0x22) SetMatrix p2", lambda: dev.cmd_query(0x22)),
+        ("cmd_query(0x32) SetMatrix p3", lambda: dev.cmd_query(0x32)),
+        ("cmd_query(0x92) SetPSD", lambda: dev.cmd_query(0x92)),
+        ("cmd_query(0x75) DFU", lambda: dev.cmd_query(0x75)),
+        ("SET_FEATURE report 0x08, 520 bytes",
+         lambda: dev.set_feature_report(REPORT_ID_CONFIG, bytes(520))),
+        ("SET_FEATURE report 0x05, cmd 0x12",
+         lambda: dev.set_feature_report(REPORT_ID_CMD,
+                                         bytes([0x12]) + bytes(6))),
+        # and the one that must never have a way through
+        ("DFU with allow_write=True",
+         lambda: dev.set_feature_report(REPORT_ID_CMD,
+                                         bytes([0x75]) + bytes(6),
+                                         allow_write=True)),
+    ]
+
+    blocked = 0
+    for name, fn in attempts:
+        try:
+            fn()
+        except safety.UnsafeCommand:
+            blocked += 1
+            print(f"  blocked  {name}")
+        except Exception as exc:                       # noqa: BLE001
+            print(f"  LEAKED   {name} -- reached the device: {exc}")
+        else:
+            print(f"  LEAKED   {name} -- sent with no objection")
+
+    print(f"\n{blocked}/{len(attempts)} refused. Nothing was transmitted.")
+    return 0 if blocked == len(attempts) else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--node", type=int, default=None)
+    ap.add_argument("--guard-test", action="store_true",
+                    help="only run the adversarial safety-guard check "
+                         "(sends nothing)")
     args = ap.parse_args()
 
-    assert not (READS and False)  # reads only by construction
     path = (f"/dev/hidraw{args.node}" if args.node is not None
             else "/dev/hidraw1")
     if args.node is None:
@@ -81,10 +127,15 @@ def main() -> int:
             return 2
         path = nodes[-1]
 
+    if args.guard_test:
+        print("safety guard, adversarial check against the real send paths\n")
+        with SinoWealthDevice(path) as dev:
+            return guard_test(dev)
+
     print(f"target {path}   (read-only: writes and DFU are not in the list)")
     with SinoWealthDevice(path) as dev:
         for label, cmd, reply_id, length in READS:
-            assert cmd not in NEVER_SEND, f"refusing to send write cmd {cmd:#04x}"
+            safety.guard_command(cmd)
             reply, err = query(dev, cmd, reply_id, length)
             if err:
                 print(f"  {label}  {err}")

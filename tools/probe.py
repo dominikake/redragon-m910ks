@@ -21,6 +21,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import safety  # noqa: E402
+
 from sinowealth import (  # noqa: E402
     CMD_DEBOUNCE,
     CMD_FIRMWARE_VERSION,
@@ -125,14 +127,15 @@ def probe_buttons(dev: SinoWealthDevice, cmd: int, label: str) -> None:
 def sweep_candidates(dev: SinoWealthDevice) -> None:
     """
     Try a range of plausible command IDs and report any reply that echoes
-    the command byte or returns non-trivial data. Read-only: we only ever
-    send a bare command id, no payload, and never 0x75.
+    the command byte or returns non-trivial data. Read-only: every send is
+    checked by tools/safety.py, which refuses write commands and makes 0x75
+    unreachable.
     """
     print("[sweep] probing candidate command ids on report id 5")
-    print("        (read-only; 0x75 DFU is skipped)\n")
+    print("        (read-only; writes and 0x75 DFU are refused by safety.py)\n")
     baseline = None
     for cmd in list(range(0x01, 0x20)) + list(range(0x30, 0x38)):
-        if cmd == 0x75:
+        if cmd in safety.WRITE_COMMANDS or cmd == safety.DFU:
             continue
         try:
             reply = dev.cmd_query(cmd, length=REPORT_SIZE_SHORT)

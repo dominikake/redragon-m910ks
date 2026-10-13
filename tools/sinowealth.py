@@ -26,8 +26,9 @@ The 520 byte total matches libratbag's
 SINOWEALTH_CONFIG_REPORT_SIZE, so the config blob layout from
 libratbag's sinowealth driver should apply here.
 
-SAFETY: nothing in this module writes a config blob. Only read-style
-queries are implemented. See docs/PROTOCOL.md.
+SAFETY: every send goes through tools/safety.py, which refuses writes by
+default and makes command 0x75 (DFU) unreachable. Nothing here writes a
+config blob. See docs/GUI-ANALYSIS.md and docs/PROTOCOL.md.
 """
 
 from __future__ import annotations
@@ -40,6 +41,12 @@ import re
 import struct
 import sys
 import time
+
+try:
+    import safety
+except ImportError:  # allow importing this module without tools/ on the path
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import safety
 
 # --- Linux HID ioctl numbers (from linux/hidraw.h) -------------------------
 # _IOC(dir, type, nr, size) with dir=3 (read|write) for these.
@@ -128,7 +135,7 @@ CMD_GET_BUTTONS2 = 0x22
 CMD_MACRO = 0x30
 CMD_GET_CONFIG3 = 0x31
 CMD_GET_BUTTONS3 = 0x32
-CMD_DFU = 0x75  # NEVER send this. Enters the bootloader.
+CMD_DFU = 0x75  # Bootloader entry. Refused unconditionally by safety.py.
 
 
 class HidError(RuntimeError):
@@ -202,9 +209,19 @@ class SinoWealthDevice:
             buf = bytearray(fcntl.ioctl(self._fd, req, bytes(buf)))
         return bytes(buf)
 
-    def set_feature_report(self, report_id: int, data: bytes) -> int:
+    def set_feature_report(self, report_id: int, data: bytes,
+                           *, allow_write: bool = False) -> int:
+        """
+        Send a SET_FEATURE. Refuses to send anything the safety policy
+        forbids -- see tools/safety.py.
+
+        `allow_write=True` is the only way past a write refusal, and it is a
+        keyword argument so that any write shows up at the call site in a
+        diff. Command 0x75 (DFU) cannot be unlocked this way or any other.
+        """
         if data[0] != report_id:
             data = bytes([report_id]) + bytes(data)
+        safety.guard_feature_report(bytes(data), allow_write=allow_write)
         buf = bytearray(data)
         req = hidiocsfeature(len(buf))
         if len(buf) > _IOCTL_BUF_LIMIT:
@@ -221,11 +238,16 @@ class SinoWealthDevice:
             sleep
             GET_FEATURE(report_id, length)
 
-        Returns the raw reply. Raises HidError if the node refuses.
+        Returns the raw reply. Raises HidError if the node refuses, or
+        safety.UnsafeCommand if the command is forbidden by policy (which
+        propagates rather than being flattened into a HidError, so a refusal
+        can never be mistaken for a device problem).
         """
         payload = bytes([REPORT_ID_CMD, command]) + b"\x00" * (length - 2)
         try:
             self.set_feature_report(REPORT_ID_CMD, payload)
+        except safety.UnsafeCommand:
+            raise
         except OSError as exc:
             raise HidError(
                 f"SET_FEATURE id={REPORT_ID_CMD} cmd={command:#04x} failed: "

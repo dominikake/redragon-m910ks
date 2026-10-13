@@ -27,6 +27,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import safety  # noqa: E402
+
 from sinowealth import (  # noqa: E402
     HidError,
     REPORT_ID_CMD,
@@ -36,7 +38,6 @@ from sinowealth import (  # noqa: E402
     enumerate_nodes,
 )
 
-NEVER_PROBE = {0x75}
 REPLY_TARGETS = (
     (REPORT_ID_CMD, REPORT_SIZE_SHORT),
     (0x06, REPORT_SIZE_SHORT),
@@ -134,8 +135,15 @@ def main() -> int:
                     help="one-shot comparison of all nodes")
     args = ap.parse_args()
 
-    if args.cmd in NEVER_PROBE:
-        print(f"refusing to probe {args.cmd:#04x} (never sent)", file=sys.stderr)
+    if args.cmd in safety.WRITE_COMMANDS:
+        print(f"refusing to probe {args.cmd:#04x}: it is a write command "
+              f"and this repo is read-only (see tools/safety.py)",
+              file=sys.stderr)
+        return 1
+    try:
+        safety.guard_command(args.cmd)
+    except safety.UnsafeCommand as exc:
+        print(f"refusing to probe {args.cmd:#04x}: {exc}", file=sys.stderr)
         return 1
 
     if args.compare:

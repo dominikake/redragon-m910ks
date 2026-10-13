@@ -29,6 +29,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import safety  # noqa: E402
+
 from sinowealth import (  # noqa: E402
     HidError,
     REPORT_ID_CMD,
@@ -39,8 +41,10 @@ from sinowealth import (  # noqa: E402
     hexdump,
 )
 
-# Never probe these: 0x75 enters the DFU bootloader. 0x00 is not a command.
-NEVER_PROBE = {0x00, 0x75}
+# 0x00 is not a command id. 0x75 (DFU) needs no block here: tools/safety.py
+# refuses it unconditionally on every send, which is stronger than a local
+# skip list -- there is no code path that can unlock it.
+NOT_A_COMMAND = 0x00
 
 CONFIG_REPORT_ID = 0x08
 
@@ -117,7 +121,12 @@ def sweep(dev: SinoWealthDevice, lo: int, hi: int) -> dict:
           f"{[hex(r) for r, _ in REPLY_TARGETS]}\n")
     results = {}
     for cmd in range(lo, hi + 1):
-        if cmd in NEVER_PROBE:
+        if cmd == NOT_A_COMMAND:
+            results[cmd] = {"skipped": True}
+            continue
+        # Write commands and DFU are refused by tools/safety.py below. Record
+        # them as skipped rather than letting the refusal look like a failure.
+        if cmd in safety.WRITE_COMMANDS or cmd == safety.DFU:
             results[cmd] = {"skipped": True}
             continue
         hit = probe_command(dev, cmd)
@@ -129,8 +138,8 @@ def sweep(dev: SinoWealthDevice, lo: int, hi: int) -> dict:
         time.sleep(0.015)
 
     # Only entries that actually got a reply count as supported. Skipped
-    # entries (e.g. 0x75 DFU, which we must never send) are NOT supported --
-    # they were never even tried.
+    # entries (write commands, and 0x75 DFU) are NOT supported -- they were
+    # never even tried, because sending them is forbidden by tools/safety.py.
     supported = sorted(c for c, r in results.items() if "reply" in r)
     skipped = sorted(c for c, r in results.items() if r.get("skipped"))
     print(f"\n{len(supported)} supported command(s):")
