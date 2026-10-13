@@ -120,6 +120,7 @@ cat "$XDG_RUNTIME_DIR/redragon-m910ks-battery.txt"
 | `tools/probe.py` | Read-only protocol probes. |
 | `tools/sniff.py` | Passive listener for spontaneous reports. |
 | `tools/verify_vendor_cmds.py` | Read-only check of the vendor command table. |
+| `tools/profile_diff.py` | Map the config blob using the mouse's own buttons. Sends nothing. |
 | `docs/PROTOCOL.md` | Full findings: wire format, command table, unknowns. |
 | `docs/GUI-ANALYSIS.md` | RE of Redragon's Windows control panel: command table, write sequence. |
 | `docs/SETUP.md` | udev rule, group setup, troubleshooting. |
