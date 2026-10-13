@@ -77,6 +77,47 @@ method.CDevBY24G.virtual_12    0x0040b010
 method.CDevBY24G.virtual_16    0x0040bd60   <- Apply_24G
 ```
 
+### Reproducing this without redoing the archaeology
+
+Three committed helpers regenerate the load-bearing facts from `vendor/`
+alone. The scratch versions of these were lost to a `/tmp` wipe once already.
+
+```sh
+./tools/fetch_vendor.sh                                    # artifacts
+
+# 1. PE structure, exports, and VA -> file offset mapping.
+#    Needed because `objdump -p` will not print Lowerdev.dll's export
+#    directory, and every address below depends on the mapping being right.
+python3 tools/re_pe.py vendor/gui/app/Lowerdev.dll --exports
+python3 tools/re_pe.py vendor/gui/app/OemDrv.exe --where 0x40b680
+python3 tools/re_pe.py vendor/gui/app/OemDrv.exe --data 0x40b284:0x20
+
+# 2. Disassemble once. objdump -d linear sweep, ~500k instructions.
+objdump -d vendor/gui/app/OemDrv.exe > /tmp/OemDrv.asm
+
+# 3. Recover the command table from the call sites.
+python3 tools/re_cmds.py /tmp/OemDrv.asm
+
+# 4. Read one function. objdump loses instruction alignment in data regions
+#    near 0x40b000 and never recovers, so restarting at a known function
+#    boundary is the only way to read that code.
+python3 tools/re_fn.py /tmp/OemDrv.asm 0x40b010 --calls
+```
+
+`re_cmds.py` on its own reproduces the whole command table in this document:
+
+```
+0x40a325 SendCmd  0x01
+0x40a41d SendCmd  0x11 0x21 0x31
+0x40a553 GetCmd   0x11 0x21 0x31 0x92
+0x40a5cd SendCmd  0x90
+0x40a727 GetCmd   0x12 0x22 0x32 0x50 0xa5
+0x40a7fb GetCmd   0x30 0x02
+```
+
+Note that `0x12`, `0x22`, `0x32` and `0x30` — the four the echo-oracle sweep
+could not see — fall straight out of the disassembly.
+
 ## Device module: `CDrvBY24G`
 
 Debug strings identify the driver class and the three device interfaces it
@@ -294,20 +335,51 @@ code; the `0xA8`/`0xA9`/`0xAC`/`0xAE` group on K6/K7/K8/K10 are the
 programmable macro buttons.
 
 The matrix builder at `0x40b010` dispatches on **byte 0**, biased by
-`0x10`, through a 235-entry table at `0x40b284` and a jump table at
-`0x40b244`. Special-cased function IDs:
+`0x10`, through a case table at `0x40b284` and a 16-entry jump table at
+`0x40b244`.
 
-| Case | Function IDs | Encoded as |
-|---|---|---|
-| 1 | `0x11`, `0xa2`, `0xa3` | `0x01`, size 6 |
-| 2 | `0x12`, `0xa4`, `0xa5` | `0x02`, size 6 |
-| 3 | `0x5b`, `0x5c` | `0x04`, size 6 |
-| 4 | `0xf0` | `0x08`, size 6 |
-| 5–14 | `0xf1`–`0xfa` | size 1 |
-| 15 | `0x13`–`0xef` (default) | keyboard / media / combo |
+> **Corrected.** An earlier version of this section had the encoded column
+> off by one and omitted case 0 entirely. The table below is the verified
+> one, regenerable with `tools/re_pe.py`; the error came from pairing each
+> case index with the previous case's encoded byte.
 
-`0xf0`–`0xfa` look like the dedicated hardware buttons (DPI, RGB, profile
-switch, fire key). Not confirmed.
+The bounds check is `cmp $0xea`, so only FunIDs `0x10..0xFA` are reachable.
+The ten table entries past that hold out-of-range values and are dead data.
+
+| case | FunIDs | size (`bl`) | encoded | meaning |
+|---|---|---|---|---|
+| 0 | `0x10`, `0xa0`, `0xa1` | 6 | `0x02` | |
+| 1 | `0x11`, `0xa2`, `0xa3` | 6 | `0x01` | left click |
+| 2 | `0x12`, `0xa4`, `0xa5` | 6 | `0x04` | |
+| 3 | `0x5b`, `0x5c` | 6 | `0x08` | |
+| 4 | `0xf0` | 1 | `0x01` | |
+| 5 | `0xf1` | 1 | `0x02` | |
+| 6 | `0xf2` | 1 | `0x04` | |
+| 7 | `0xf3` | 1 | `0x08` | |
+| 8 | `0xf4` | 1 | `0x10` | |
+| 9 | `0xf5` | 4 | *increments* | |
+| 10 | `0xf6` | 4 | *increments* | |
+| 11 | `0xf7` | 3 | *increments* | |
+| 12 | `0xf8` | 3 | *zeroes* | |
+| 13 | `0xf9` | 2 | *increments* | |
+| 14 | `0xfa` | 2 | *zeroes* | |
+| 15 | `0x13`–`0xef` (213) | 5 | default | keyboard / media / combo |
+
+Two shapes fall out of this that were not visible before:
+
+- **`0xf0`–`0xf4` encode a clean bit pattern** (`0x01`, `0x02`, `0x04`,
+  `0x08`, `0x10`) at size 1 — five independent single-bit flags. Strong
+  candidate for the dedicated hardware buttons.
+- **`0xf5`–`0xfa` pair up**: `(0xf5, 0xf6)` both size 4, `(0xf7, 0xf8)` both
+  size 3, `(0xf9, 0xfa)` both size 2, and within each pair one handler
+  *increments* the counter while the other *zeroes* it. That is the shape of
+  a pair of related settings, e.g. two sides of one function.
+
+Neither interpretation is confirmed. `text.xml` names DPI, RGB, profile
+switch and fire key as distinct hardware actions, so five flags fits — but
+naming them needs the button mapping from #3, not more disassembly.
+
+The 6-byte encodings and their field meanings remain open — that is #8.
 
 ## Feature inventory
 
