@@ -131,16 +131,24 @@ def main() -> int:
         with open(BASELINE, "rb") as fh:
             base = fh.read()
         print(f"watching for {args.seconds:.0f}s against the saved baseline.")
-        print("Press a button on the MOUSE now. Nudge it to wake it up.\n")
+        print("Press a button on the MOUSE while this runs.")
+        print("Keep nudging the mouse -- if it sleeps, reads stall.\n")
         prev = base
         deadline = time.time() + args.seconds
         seen: set = set()
+        reads = stalled = 0
         with open_device() as dev:
             while time.time() < deadline:
                 blob = read_config(dev)
                 if blob is None:
+                    stalled += 1
+                    if stalled == 3 and reads == 0:
+                        print("  still no response -- the mouse is probably "
+                              "asleep.\n  MOVE IT (or click a button) and keep "
+                              "waiting.\n")
                     time.sleep(args.every)
                     continue
+                reads += 1
                 if blob == prev:
                     time.sleep(args.every)
                     continue
@@ -151,8 +159,22 @@ def main() -> int:
                     seen.update(i for i, _, _ in changes)
                 prev = blob
                 time.sleep(args.every)
-        print(f"done. offsets that moved at least once: "
-              f"{sorted(hex(i) for i in seen) if seen else 'none'}")
+
+        # Without this, "nothing changed" and "never managed to read at all"
+        # print the same thing, and the second one makes the run worthless.
+        print(f"\nreads: {reads} successful, {stalled} stalled (asleep) "
+              f"out of {reads + stalled} attempts")
+        if reads == 0:
+            print("\nNO READS AT ALL -- the mouse never woke up. "
+                  "Move it while watching, then run this again.")
+            return 2
+        if seen:
+            print("offsets that moved at least once: "
+                  + " ".join(hex(i) for i in sorted(seen)))
+        else:
+            print("offsets that moved at least once: none "
+                  "-- nothing you pressed changed the config, "
+                  "which is itself an answer")
         return 0
 
     with open_device() as dev:
