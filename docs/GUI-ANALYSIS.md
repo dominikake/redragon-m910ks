@@ -54,6 +54,17 @@ Analysis used instead:
 
 **No `sudo`, no system packages installed, no system files modified.**
 
+### Keep scratch in `vendor/`, not `/tmp`
+
+The first pass at this analysis unpacked everything into `/tmp`, and `/tmp` got
+wiped between sessions — taking the vendor tree, the disassembly and the
+helper scripts with it. The findings survived only because they had already
+been written up here.
+
+Put analysis scratch in `vendor/` (gitignored) instead. It is on the same
+filesystem as the repo, it is not swept, and `tools/fetch_vendor.sh` already
+populates it.
+
 `radare2` recovered the driver class vtable, which is what made the rest
 tractable:
 
