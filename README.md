@@ -118,7 +118,9 @@ cat "$XDG_RUNTIME_DIR/redragon-m910ks-battery.txt"
 | `tools/watch.py` | Poll one command and report changes. |
 | `tools/probe.py` | Read-only protocol probes. |
 | `tools/sniff.py` | Passive listener for spontaneous reports. |
+| `tools/verify_vendor_cmds.py` | Read-only check of the vendor command table. |
 | `docs/PROTOCOL.md` | Full findings: wire format, command table, unknowns. |
+| `docs/GUI-ANALYSIS.md` | RE of Redragon's Windows control panel: command table, write sequence. |
 | `docs/SETUP.md` | udev rule, group setup, troubleshooting. |
 | `install.sh` | Installs tools + the systemd user timer. |
 | `systemd/` | `redragon-battery.service` / `.timer` units. |
@@ -146,6 +148,8 @@ cat "$XDG_RUNTIME_DIR/redragon-m910ks-battery.txt"
 - [x] Omarchy bar indicator + UPower bridge built
 - [x] Stale/flat detection so a dead mouse never shows a frozen percent
 - [x] Persistent history + discharge-curve plotter
+- [x] **Reverse engineer the Windows control panel** — full vendor command
+      table, config layout and write sequence (`docs/GUI-ANALYSIS.md`)
 
 Not affiliated with or endorsed by Redragon. Reverse engineering for
 personal use on hardware the user owns.

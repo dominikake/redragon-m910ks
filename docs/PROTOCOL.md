@@ -139,6 +139,68 @@ battery.
 | `0x30` | Write macro | write -- never sent |
 | `0x75` | Enter DFU | **never sent** |
 
+## Command table — vendor-verified
+
+Recovered from Redragon's own Windows control panel by static analysis. See
+[GUI-ANALYSIS.md](GUI-ANALYSIS.md) for method and evidence. The app talks
+to this chipset through a class named `CDrvBY24G`, and its entire command
+surface is:
+
+| cmd | meaning | direction | app address |
+|---|---|---|---|
+| `0x01` | general / firmware info | read | `0x40a2f0` |
+| `0x11` | get config, profile 1 | read | `0x40a3c0` |
+| `0x21` | get config, profile 2 | read | `0x40a3c0` |
+| `0x31` | get config, profile 3 | read | `0x40a3c0` |
+| `0x12` | set key matrix, profile 1 | **write** | `0x40a680` |
+| `0x22` | set key matrix, profile 2 | **write** | `0x40a680` |
+| `0x32` | set key matrix, profile 3 | **write** | `0x40a680` |
+| `0x30` | set macro | **write** | `0x40a760` |
+| `0x90` | read power (battery + USB-connected) | read | `0x40a590` |
+| `0x92` | write PSD (device signature) | **write** | `0x40a4d0` |
+
+**This resolves the sweep's blind spot.** `0x12`, `0x22` and `0x30` were
+previously recorded as unsupported or empty. They are implemented — they
+are *write* commands, which do not echo, so the byte-1 echo oracle could
+never detect them. `0x31` was recorded "untested" rather than unsupported
+and is in fact the profile-3 read.
+
+Notably the command set is *smaller* than libratbag's wired reference mice
+(no `0x1a` debounce, no `0x1b` LOD/angle-snap). Buttons, DPI, lighting,
+polling rate and macros are all reached through `0x11/0x21/0x31` (the 520-
+byte config blob) plus `0x12/0x22/0x32` (the key matrix) — there is no
+per-setting command at all.
+
+### Transport, independently confirmed
+
+The app's `SendCmd` builds exactly what `tools/sinowealth.py` already sends:
+
+```
+SET_FEATURE(report 0x05, [0x05, CMD, a1, a2, a3, a4, 0, 0])
+    3 attempts, Sleep(200) between
+```
+
+The 5-byte command struct is `{cmd, a1, a2, a3, a4}`. The 200 ms settle and
+3 retries are the likely reason that polling faster returns "asleep".
+
+The driver also opens three handles -- `m_hCmd`, `m_hData`, `m_hNotify` --
+i.e. separate command, bulk-data and notify interfaces. Our reader only
+uses the first.
+
+### `SetMatrix` packet
+
+```
+[0x00]  command            0x12 / 0x22 / 0x32
+[0x02]  0x50  (80)         payload length
+[0x07..0x56] 80 bytes      key matrix payload
+[0x57]  0xa5               terminator
+```
+
+`0x07 + 0x50 = 0x57` is why byte 2 reads as a length rather than a constant.
+This is the most likely origin of the lone `0xa5` at offset `0x97` of the
+config blob: the matrix is nested inside the larger blob. Strong inference,
+not observed on the wire.
+
 ## Command table (empirically confirmed, `258a:002e` fw `2876`)
 
 Full sweep of `0x01`..`0xFF` found exactly these:
@@ -252,28 +314,32 @@ struct is ~160 bytes:
 - `[9]` = `0x13` -> report_rate nibble `3` = 500 Hz, flags nibble `1`
 - `[10]` = `0x01` -> dpi_count / active_dpi nibbles
 - `[11]` = `0x15` -> bitmask, plausibly disabled DPI slots
-- A lone `a5` appears at offset `0x97` -- could be a marker or a field
-  that happens to sit at a non-zero default.
+- A lone `a5` appears at offset `0x97` -- see GUI-ANALYSIS.md: this is
+  almost certainly the key-matrix terminator (`0xa5` at matrix offset
+  `0x57`), nested inside the larger blob.
 
 ## What is NOT known
 
-**The battery field.** Not documented in libratbag, in any Redragon
-project, or in the Sino Wealth firmware tooling (`carlossless/sinowisp`).
-The two live candidates are `cmd 0x90`'s body and offset `0x08` in the
-`0x11` config blob; both need a charging-state diff to confirm.
+**The battery field** is settled: `cmd 0x90` reply byte 3 on the dongle,
+confirmed live. The vendor app reads the same command and parses it as
+`ReadPower: nPower=%d, nUsbConnect=%d` -- so reply byte 2 is very likely the
+charging / USB-connected flag that `tools/battery.py` currently leaves as
+`None`. Worth a diff against charging state to confirm.
 
-The Chinese-language RE guide for this vendor class notes that Sino Wealth
-wireless *keyboards* answer a status query with an ACK packet followed by a
-separate status packet (`13 0A 01 ...` on report id `0x13`) carrying the
-battery. No such two-packet behaviour appeared here -- every reply is a
-single echo-bearing packet -- which is consistent with `0x90` being this
-device's condensed equivalent.
+Still open:
 
-A Chinese-language RE guide for this vendor class documents that Sino
-Wealth wireless keyboards use a `13 0A 01 ...` status packet (report ID
-`0x13`) that carries the battery, returned *after* an ACK packet. Mouse
-chips may use a different report ID, but the ACK-then-status pattern is
-worth expecting.
+1. **Flash or RAM.** Not determined, and the most important one: it decides
+   whether a malformed write is a harmless scare or a dead mouse. No
+   firmware image ships with the installer and the bulk-data routines were
+   not fully decoded.
+2. **Whether a defaults-restore exists on the wire.** The GUI has a
+   `Restore` / `Reset` button (`tc_restore`, `tc_reset`, `tc_msg5`), but the
+   command behind it was not traced. Do not assume an escape hatch.
+3. **The 520-byte blob field layout**, beyond the nested key-matrix region.
+   The general block is assembled by app routines at `0x40b750` / `0x40b9f0`
+   that were not decoded. Byte `[8] = 0x64` remains unexplained.
+4. Meaning of the special FunIDs `0x5b` / `0x5c` and the `0xf0`-`0xfa`
+   group (probably the dedicated DPI / RGB / profile / fire buttons).
 
 ## Known risks
 
@@ -302,13 +368,18 @@ worth expecting.
 
 ## Suggested order of work
 
-1. Passive sniff `hidraw5` (wired) for anything the device volunteers
-   unprompted. Zero risk, and it might just work.
-2. Capture the vendor web driver via WebHID monkeypatch if the M910-KS is
-   served through Redragon's browser control center -- gives exact ground
-   truth, no Windows needed.
-3. Fall back to unpacking `Redragon_M910KS_Setup_v1.0_2876_BY1064_P3104.rar`
-   and reading command tables out of the binary.
-4. Active probing of report ID 5, read-only, diffing replies.
-5. Once the battery field is found, write a polling daemon that publishes
-   over D-Bus UPower-style so existing applets pick it up.
+Steps 1-4 are done. The vendor app has been unpacked and its command table
+extracted -- see [GUI-ANALYSIS.md](GUI-ANALYSIS.md). Remaining work, in
+order of value:
+
+1. **Decode the bulk-data routines** at `0x40b750` / `0x40b9f0`, which
+   build the "general" block that `Apply_24G` writes. This closes most of
+   the 520-byte layout and is pure static analysis -- zero hardware risk.
+   A real decompiler (`GHIDRA_INSTALL_DIR`) would make this routine work.
+2. **Diff `cmd 0x90` reply byte 2 against charging state** to confirm it is
+   `nUsbConnect`, then fill in `tools/battery.py`'s `charging` field.
+   Read-only, one cable insert.
+3. **Trace the GUI's Restore button** to find out whether a defaults-reset
+   exists on the wire. Worth knowing before any write, not after.
+4. Only then consider writing DPI / lighting from Linux -- see the risk
+   notes in GUI-ANALYSIS.md.

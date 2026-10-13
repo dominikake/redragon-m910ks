@@ -4,6 +4,10 @@ __pycache__/
 # Local capture/log output from confirm.py and plot.py
 captures/
 
+# Vendor binaries unpacked from the Redragon installer (docs/GUI-ANALYSIS.md).
+# Redragon's IP -- never commit these.
+vendor/
+
 # Local persistent reading history (tools/history.py)
 *.jsonl
 state/
