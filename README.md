@@ -128,12 +128,36 @@ cat "$XDG_RUNTIME_DIR/redragon-m910ks-battery.txt"
 ## Design constraints
 
 - **Zero dependencies.** No pip/pyusb/hidapi; `fcntl`/`ctypes` only.
-- **Read-only.** No command writes a config blob. Sino Wealth devices have
-  a documented history of soft-bricking from malformed writes (OpenRGB
-  disabled its driver over this). Command `0x75` (DFU) is never sent and is
-  hard-blocked in the sweep and watcher.
+- **Read-only until proven otherwise.** *No tool in this repo sends a config,
+  matrix, macro or PSD write.* The full command set is known
+  ([`docs/GUI-ANALYSIS.md`](docs/GUI-ANALYSIS.md)) and the write half is
+  deliberately unused.
 - **Sleep-aware.** The mouse sleeps when idle and returns `0x00`; every
   consumer treats that as *unknown*, never as *0%*.
+
+### Safety policy
+
+Sino Wealth devices have a documented history of soft-bricking from malformed
+writes — OpenRGB disabled its driver over exactly this. That history, plus
+one device and no spare, is why the write half of the protocol is understood
+but untouched.
+
+Two things are worth being precise about:
+
+- **Whether settings live in flash or RAM is not ours to choose.** The device
+  commits its own changes to storage the moment you press a button on the
+  mouse. That is safe, because the value is one the device considers valid.
+  The risk being avoided is *us* crafting 520 bytes and hoping.
+- **Recovery has to be reachable without Windows.** A mouse that is
+  recoverable in principle, but only by running Redragon's Windows updater,
+  is not recoverable for a Linux-only user. Functionally a brick. See #9.
+
+Command `0x75` (DFU) is never sent and has no override path. Writes require
+an explicit `allow_write=True` at the call site, so any write shows up in a
+diff. Both are enforced in code, not by convention — see #12.
+
+Lifting the policy requires establishing a recovery path that does not depend
+on Windows (#9) — not merely a successful read.
 
 ## Status
 
