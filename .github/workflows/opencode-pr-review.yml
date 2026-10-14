@@ -56,7 +56,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
-          OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "4096"
+          OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "2048"
         with:
           model: cloudflare-workers-ai/@cf/mistralai/mistral-small-3.1-24b-instruct
           agent: review
