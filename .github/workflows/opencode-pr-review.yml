@@ -27,6 +27,7 @@ jobs:
           persist-credentials: false
 
       - name: Read-only static checks
+        id: static
         run: |
           {
             echo "### py_compile"
@@ -34,6 +35,11 @@ jobs:
             echo "### safety.py"
             python tools/safety.py
           } > /tmp/redragon-static.txt 2>&1 || true
+          {
+            echo "results<<REDRAGON_STATIC_EOF"
+            cat /tmp/redragon-static.txt
+            echo "REDRAGON_STATIC_EOF"
+          } >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
       - name: Size gate
@@ -64,7 +70,9 @@ jobs:
           share: false
           prompt: |
             Review this pull request per the review agent instructions.
-            Also read /tmp/redragon-static.txt if it exists and fold failures into findings.
+            Static check output (may be empty):
+            ${{ steps.static.outputs.results }}
+            Do not read files outside the repository worktree.
             Do not run tests or modify files. Read-only.
 
       - name: Skip notice for oversized PRs
