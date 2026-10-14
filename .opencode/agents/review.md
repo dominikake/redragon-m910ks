@@ -1,7 +1,7 @@
 ---
 description: Read-only reviewer for pull requests on redragon-m910ks
 mode: primary
-model: cloudflare-workers-ai/@cf/qwen/qwen2.5-coder-32b-instruct
+model: cloudflare-workers-ai/@cf/mistralai/mistral-small-3.1-24b-instruct
 temperature: 0.1
 steps: 20
 permission:
