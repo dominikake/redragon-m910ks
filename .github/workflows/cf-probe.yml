@@ -13,7 +13,7 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
-          RUNS: "25"
+          RUNS: "8"
           MAX_TOKENS: "2048"
           MODELS: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
         run: node .github/scripts/cf-stream-probe.mjs
