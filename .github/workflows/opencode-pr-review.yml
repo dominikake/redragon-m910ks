@@ -1,0 +1,81 @@
+name: opencode-pr-review
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+concurrency:
+  group: opencode-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+
+jobs:
+  review:
+    if: |
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !contains(github.event.pull_request.user.login, '[bot]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read-only static checks
+        id: static
+        run: |
+          {
+            echo "### py_compile"
+            python -m py_compile tools/*.py
+            echo "### safety.py"
+            python tools/safety.py
+          } > /tmp/redragon-static.txt 2>&1 || true
+          {
+            echo "results<<REDRAGON_STATIC_EOF"
+            cat /tmp/redragon-static.txt
+            echo "REDRAGON_STATIC_EOF"
+          } >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Size gate
+        id: size
+        run: |
+          changed_files=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" | wc -l)
+          changed_lines=$(git diff --shortstat "origin/${{ github.base_ref }}...HEAD" | grep -oE '[0-9]+ insertion|[0-9]+ deletion' | grep -oE '[0-9]+' | paste -sd+ - | bc 2>/dev/null || echo 0)
+          echo "files=$changed_files lines=$changed_lines"
+          echo "files=$changed_files" >> "$GITHUB_OUTPUT"
+          if [ "$changed_files" -gt 50 ] || [ "${changed_lines:-0}" -gt 2000 ]; then
+            echo "too_large=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "too_large=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: AI review
+        if: steps.size.outputs.too_large == 'false'
+        uses: anomalyco/opencode/github@latest
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "2048"
+        with:
+          model: cloudflare-workers-ai/@cf/mistralai/mistral-small-3.1-24b-instruct
+          agent: review
+          use_github_token: true
+          share: false
+          prompt: |
+            Review this pull request per the review agent instructions.
+            Static check output (may be empty):
+            ${{ steps.static.outputs.results }}
+            Do not read files outside the repository worktree.
+            Do not run tests or modify files. Read-only.
+
+      - name: Skip notice for oversized PRs
+        if: steps.size.outputs.too_large == 'true'
+        run: |
+          echo "::notice::AI review skipped: PR is too large. Review manually."
