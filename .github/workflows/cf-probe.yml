@@ -1,6 +1,9 @@
 name: cf-probe
 on:
   workflow_dispatch:
+  # Fires at 00:07 UTC, just after the 10k-neuron daily allocation resets.
+  schedule:
+    - cron: '7 0 * * *'
 jobs:
   probe:
     runs-on: ubuntu-latest
