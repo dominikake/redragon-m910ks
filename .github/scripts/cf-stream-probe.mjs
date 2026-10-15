@@ -10,23 +10,32 @@
 const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID
 const API_KEY = process.env.CLOUDFLARE_API_KEY
 const RUNS = Number(process.env.RUNS || 15)
+const MAX_TOKENS = Number(process.env.MAX_TOKENS || 64)
 
 if (!ACCOUNT_ID || !API_KEY) {
   console.error('Missing CLOUDFLARE_ACCOUNT_ID and/or CLOUDFLARE_API_KEY')
   process.exit(2)
 }
 
-const MODELS = [
-  '@cf/mistralai/mistral-small-3.1-24b-instruct', // control: current model, known to fail
-  '@cf/meta/llama-3.1-8b-instruct', // primary candidate
-  '@cf/meta/llama-3.3-70b-instruct-fp8-fast', // fallback candidate
-]
+const MODELS = (process.env.MODELS || '@cf/mistralai/mistral-small-3.1-24b-instruct').split(',')
 
 const ENDPOINT = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/v1/chat/completions`
 
+// Approximates the real review workload: a large PR-diff-ish prompt plus a long
+// generated review. The numeric-delta bug is chunk-level, so both a big prompt
+// and a long generation matter for reproducing it.
+const FILLER = `tools/re_pe.py parses PE headers and emits a JSON summary of sections.
+tools/re_cmds.py wraps the RE command surface and records a transcript.
+tools/re_fn.py walks the import table and resolves function names.
+`.repeat(60)
+
 const PROMPT =
-  'In one sentence, describe what a binary reverse engineering tool does. ' +
-  'Do not use any numbers or lists.'
+  'You are reviewing a pull request. Reply with a detailed review.\n\n' +
+  'The pull request adds three offline helpers to regenerate analysis in docs/GUI-ANALYSIS.md from vendor/ alone. ' +
+  'The pull request also corrects an error in the FunID table.\n\n' +
+  'Changed files:\n' +
+  FILLER +
+  '\nWrite a thorough multi-paragraph review covering correctness, naming, and docs.'
 
 async function probeOnce(model) {
   const res = await fetch(ENDPOINT, {
@@ -38,7 +47,7 @@ async function probeOnce(model) {
     body: JSON.stringify({
       model,
       stream: true,
-      max_tokens: 64,
+      max_tokens: MAX_TOKENS,
       messages: [{ role: 'user', content: PROMPT }],
     }),
   })
@@ -113,9 +122,9 @@ for (const model of MODELS) {
     }
   }
 
-  results.push({ model, runs: RUNS, bad, errors, totalChunks, samples })
+  results.push({ model, runs: RUNS, maxTokens: MAX_TOKENS, bad, errors, totalChunks, samples })
   const verdict = errors > 0 ? 'ERRORS' : bad === 0 ? 'CLEAN' : 'FLAKY'
-  const line = `${model}: ${verdict} (${bad}/${RUNS - errors} runs emitted numeric content, ${errors}/${RUNS} errored, ${totalChunks} chunks)`
+  const line = `${model}: ${verdict} (${bad}/${RUNS - errors} runs emitted numeric content, ${errors}/${RUNS} errored, ${totalChunks} chunks, ${Math.round(totalChunks / Math.max(RUNS - errors, 1))} chunks/run)`
   console.log(line)
   summary += `- ${line}\n`
 }
