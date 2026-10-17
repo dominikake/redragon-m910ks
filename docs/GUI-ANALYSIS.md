@@ -252,10 +252,12 @@ The identity `0x07 + 0x50 = 0x57` is what makes byte 2 read as a length
 rather than a constant — the `0xa5` lands exactly one past an 80-byte
 payload. Flagged as **strong inference**, not observation.
 
-**This is the most likely origin of the lone `0xa5` at offset `0x97` of the
-520-byte config blob recorded in `PROTOCOL.md`** — `0x07 + 0x50 = 0x57`
-within the 80-byte matrix, nested inside the larger blob. Consistent, but
-not proven without a captured write.
+**Not** the origin of the `0xa5` in the 520-byte config blob. An earlier
+version of this file proposed the matrix terminator as its origin, on the
+strength of `0x97 - 0x50 = 0x47`. That was inference, never observed, and it
+is wrong: the blob's only `0xa5` is at offset `0x98`, where the
+general-block packer writes a hard-coded constant (#6). The two `0xa5` bytes
+are unrelated.
 
 ### `SetMacro` packet
 
@@ -458,47 +460,62 @@ is consistent with the latter — but it is **not established**.
 0030  00 00 ff 00 ff 00 ff 00 ff ff ff 00 00 ff ff ff   |................|
 0040  ff ff ff 46 00 01 42 01 40 ff 00 00 42 07 ff 00   |...F..B.@...B...|
 0050  00 00 ff 00 00 00 ff ff 00 ff ff ff 00 ff 80 00   |................|
-...
-0090  00 ff ff 02 42 40 ff 00 00 00 ff 00 00 00 ff ff   |....B..........|
-00a0  00 ff ff ff 00 ff ff ff 00 00 00 00 00 00 00 00   |................|
-00b0  00 00 00 00 42 ff 00 00 00 ff 00 42 42 02 ff 00   |....B......BB...|
-00c0  00 00 00 00 01 02 ff 00 00 a5 00 00 00 00 00 00   |................|
+0060  00 ff ff 02 42 40 ff 00 00 00 ff 00 00 00 ff ff   |....B@..........|
+0070  00 ff ff ff 00 ff ff 00 00 00 00 00 00 00 00 00   |................|
+0080  00 00 00 00 42 ff 00 00 00 ff 00 42 42 02 ff 00   |....B......BB...|
+0090  00 00 00 01 02 ff 00 00 a5 00 00 00 00 00 00 00   |................|
 ```
 
-Raw copy kept out of git; re-read it any time with
-`python3 tools/verify_vendor_cmds.py`.
+Offsets `0x000`–`0x09f` shown contiguously; the blob is 520 bytes and the
+rest is not yet mapped. Raw copy kept out of git; re-read it any time with
+`python3 tools/verify_vendor_cmds.py`, and diff it against
+`captures/vendor-0x21-dongle.bin`.
 
-**Offsets 12..21 are the DPI table.** Read as five 16-bit little-endian
-values:
+**Offsets 13..22 are the DPI table**, as five 16-bit little-endian values:
 
-| offset | bytes | value |
-|---|---|---|
-| 12 | `00 02` | 512 |
-| 14 | `00 04` | 1024 |
-| 16 | `00 08` | 2048 |
-| 18 | `00 0c` | 3072 |
-| 20 | `00 10` | 4096 |
+| offset | bytes | stored | ×250 = DPI |
+|---|---|---|---|
+| 13 | `02 00` | 2 | 500 |
+| 15 | `04 00` | 4 | 1000 |
+| 17 | `08 00` | 8 | 2000 |
+| 19 | `0c 00` | 12 | 3000 |
+| 21 | `10 00` | 16 | 4000 |
 
-Five levels, matching `DM=5` and `DPI=500,1000,2000,3000,4000` in
-`Cfg.ini`. The device rounds each level up to the next multiple of 512, so
-the stored values are the quantised form of the nominal DPI. **This is a
-new finding** — no prior document in this repo had identified the DPI
-table's location.
+Five levels, matching `DM=5`. The stored values are indices into the
+`DPISET` ladder in `Cfg.ini`, which runs `250,500,750,…` in 250 steps — so
+index *n* means *n*×250 DPI, giving exactly `DPI=500,1000,2000,3000,4000`
+from the same file.
 
-**`0xa5` lands at offset `0x97`,** exactly where `PROTOCOL.md` recorded it
-in an earlier session and exactly where the `SetMatrix` analysis predicted
-a terminator would be. The predicted write-packet arithmetic
-(`payload at 0x07`, `length 0x50`, `terminator at 0x07 + 0x50 = 0x57`) is
-mirrored here by `0x97 - 0x50 = 0x47`, a constant `0x40` shift — consistent
-with the matrix being nested at a fixed offset inside the larger blob.
+> **Corrected.** This table previously started at offset **12** and read
+> `00 02` = **512**, `1024`, `2048`, `3072`, `4096`, on the theory that "the
+> device rounds each level up to the next multiple of 512". Both the offset
+> and the units were wrong, and the rounding story was a rationalisation of
+> the error: 512 is 2×256, not a DPI value. Reading one byte early makes each
+> 16-bit value 256× too large. See #6 — the packer writes the low byte first
+> from a cursor at offset `0x0d`.
 
-The region from `0x45` to `0x97` is dense with `0xff`, matching keys set
+**`0xa5` is at offset `0x98`**, and it is a hard-coded constant — the last
+byte of the 146-byte general block, written by `movb $0xa5,0x90(%esi)` at
+`0x40ba2f`. It is **not** related to the `SetMatrix` terminator.
+
+> **Corrected.** This section previously placed `0xa5` at `0x97` and argued
+> for it from `0x97 - 0x50 = 0x47`, a "constant `0x40` shift" mirroring the
+> matrix arithmetic. That inference was wrong, and its stated evidence was
+> not real: the hexdump above previously ended with four rows copied from a
+> *different* capture, one of which was a byte-for-byte duplicate of the real
+> row at `0x0060`. The blob contains exactly one `0xa5`, at `0x98`.
+
+`PROTOCOL.md` carried both errors and has been corrected.
+
+The region from `0x45` to `0x95` is dense with `0xff`, matching keys set
 to *Disable* (`tc_key_off`), and carries repeated `0x42` bytes that look
 like per-key function tags.
 
-Byte `[8] = 0x64` = 100 remains unexplained — it is stable across the
-`0x11` read recorded earlier and this `0x21` read, on two different USB
-products.
+Byte `[8] = 0x64` = 100 is **explained** (#6): it is the first byte of the
+general block, written as a hard-coded constant by `movb $0x64,(%esi)` at
+`0x40b75d`. It is stable across the `0x11` and `0x21` reads on two different
+USB products because it is a constant, not device state — so it is not a
+candidate for anything and will never move.
 
 ## Still unknown
 
@@ -514,16 +531,13 @@ Stated plainly, because these matter for anyone considering writes.
    restore?"), but its protocol command was **not** traced. Whether a
    defaults-restore exists on the wire is unknown. Do not assume an escape
    hatch until this is confirmed.
-3. The exact field layout of the 520-byte config blob beyond the matrix
-   region. The general block is built by routines at `0x40b750` / `0x40b9f0`
-   that were not fully decoded.
+3. The field layout of the 520-byte config blob. Partly resolved (#6): the
+   general block at `[8..0x99]` is now mapped. The remaining un-decoded span
+   is `[0x99..0x207]`.
 4. Why the dongle answers `0x21` but stalls `0x11` / `0x31`, while the
    wired mouse answered `0x11`. Needs a wired-vs-dongle comparison.
 5. The meaning of the special FunIDs `0x5b`/`0x5c` and the `0xf0`–`0xfa`
    group.
-6. Whether byte 8 of the config blob (`0x64` = 100) is the sensor id, a
-   default, or something else — still unresolved, and stable across reads
-   on two different USB products.
 
 ## Risk notes
 
