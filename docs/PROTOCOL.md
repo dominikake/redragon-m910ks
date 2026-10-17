@@ -197,9 +197,13 @@ uses the first.
 ```
 
 `0x07 + 0x50 = 0x57` is why byte 2 reads as a length rather than a constant.
-This is the most likely origin of the lone `0xa5` at offset `0x97` of the
-config blob: the matrix is nested inside the larger blob. Strong inference,
-not observed on the wire.
+
+> **Superseded.** An earlier version of this file claimed the lone `0xa5` at
+> offset `0x97` of the config blob was this same terminator, nested inside
+> the larger structure. That was an inference, never observed on the wire,
+> and it is wrong: the blob's only `0xa5` is at offset `0x98`, it is a
+> hard-coded constant written by the general-block packer, and it has nothing
+> to do with the matrix terminator. See GUI-ANALYSIS.md and #6.
 
 ## Command table (empirically confirmed, `258a:002e` fw `2876`)
 
@@ -307,16 +311,21 @@ struct is ~160 bytes:
 00a0  00 00 ... (all zero to 0x207)
 ```
 
+> These offsets are from the earlier **wired `258a:002e` `0x11` read**. The
+> dongle `0x21` capture in `captures/` differs at `[9]`–`[11]`; see #7.
+
 - `[0]` report id `0x08`, `[1]` echoed command `0x11`
-- `[8]` = `0x64` = 100 -- libratbag places the *sensor id* here, but no PMW
-  id equals `0x64`, so on this device that offset may mean something else.
-  Suspected battery candidate, not yet proven; must be shown to move.
+- `[8]` = `0x64` = 100 -- **now explained** (#6): it is the first byte of the
+  general block, a hard-coded constant (`movb $0x64,(%esi)` at `0x40b75d`).
+  Not a sensor id and not battery-related; it is a constant, so it will never
+  move.
 - `[9]` = `0x13` -> report_rate nibble `3` = 500 Hz, flags nibble `1`
 - `[10]` = `0x01` -> dpi_count / active_dpi nibbles
 - `[11]` = `0x15` -> bitmask, plausibly disabled DPI slots
-- A lone `a5` appears at offset `0x97` -- see GUI-ANALYSIS.md: this is
-  almost certainly the key-matrix terminator (`0xa5` at matrix offset
-  `0x57`), nested inside the larger blob.
+- The lone `a5` is at offset `0x98`, not `0x97` -- and it is a hard-coded
+  constant at the end of the general block, **not** the key-matrix terminator
+  nested inside the blob. That was an inference, never observed on the wire,
+  and it was wrong (#6).
 
 ## What is NOT known
 
@@ -336,8 +345,10 @@ Still open:
    `Restore` / `Reset` button (`tc_restore`, `tc_reset`, `tc_msg5`), but the
    command behind it was not traced. Do not assume an escape hatch.
 3. **The 520-byte blob field layout**, beyond the nested key-matrix region.
-   The general block is assembled by app routines at `0x40b750` / `0x40b9f0`
-   that were not decoded. Byte `[8] = 0x64` remains unexplained.
+   Partly resolved (#6): the general block at `[8..0x99]` is mapped. The
+   remaining un-decoded span is `[0x99..0x207]`.
+   Byte `[8] = 0x64` is **explained** — a hard-coded constant at the start
+   of the general block.
 4. Meaning of the special FunIDs `0x5b` / `0x5c` and the `0xf0`-`0xfa`
    group (probably the dedicated DPI / RGB / profile / fire buttons).
 
