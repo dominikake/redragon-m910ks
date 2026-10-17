@@ -334,17 +334,55 @@ lands on K9, matching the physical layout). Byte 1 carries the function
 code; the `0xA8`/`0xA9`/`0xAC`/`0xAE` group on K6/K7/K8/K10 are the
 programmable macro buttons.
 
-The matrix builder at `0x40b010` dispatches on **byte 0**, biased by
-`0x10`, through a case table at `0x40b284` and a 16-entry jump table at
-`0x40b244`.
+The matrix builder at `0x40b010` dispatches on **byte 0** of each record,
+in **two stages**. The whole dispatch is six instructions:
 
-> **Corrected.** An earlier version of this section had the encoded column
-> off by one and omitted case 0 entirely. The table below is the verified
-> one, regenerable with `tools/re_pe.py`; the error came from pairing each
-> case index with the previous case's encoded byte.
+```
+  40b072:  8a 0e                 mov    (%esi),%cl        ; cl = byte 0 = the FunID
+  40b088:  0f b6 d1              movzbl %cl,%edx
+  40b08b:  83 c2 f0              add    $0xfffffff0,%edx   ; edx = FunID - 0x10
+  40b093:  81 fa ea 00 00 00     cmp    $0xea,%edx
+  40b099:  0f 87 b8 00 00 00     ja     0x40b157           ; out of range -> default
+  40b09f:  0f b6 92 84 b2 40 00  movzbl 0x40b284(%edx),%edx ; stage 1: FunID -> case
+  40b0a6:  ff 24 95 44 b2 40 00  jmp    *0x40b244(,%edx,4)   ; stage 2: case -> handler
+```
 
-The bounds check is `cmp $0xea`, so only FunIDs `0x10..0xFA` are reachable.
-The ten table entries past that hold out-of-range values and are dead data.
+Stage 1 indexes a **235-byte table** at `0x40b284`; stage 2 indexes a
+**16-entry dword** jump table at `0x40b244`. Both counts are real, and they
+count different things — that was the contradiction an earlier revision of
+this section papered over with "16 reachable entries, not 235".
+
+| | address | extent | holds |
+|---|---|---|---|
+| stage 1, byte table | `0x40b284` | `235` bytes (`0x40b284`–`0x40b36e`) | case index `0x00`–`0x0f` |
+| stage 2, jump table | `0x40b244` | `64` bytes = `16` entries | handler VA |
+
+The bound is self-consistent at both levels, which is the point of splitting
+it in two:
+
+- `cmp $0xea` / `ja` is **unsigned**, so `edx` is constrained to `0..0xea` —
+  235 values — which is exactly the byte table's length. FunIDs below `0x10`
+  wrap on the `add` and also take the `ja`.
+- Every value in the byte table is `<= 0x0f`, so it can never index past the
+  16-entry jump table. **No second clamp is needed**, and none exists.
+- `ja 0x40b157` and `jump[15]` are *the same address*, so an out-of-range
+  FunID and the default case converge on one handler rather than needing a
+  separate path.
+
+Immediately past the byte table there is **one** byte, an `int3` at
+`0x40b36f`; `0x40b370` is already the next function's SEH prolog
+(`push $0xffffffff; push $0x56c08b; mov %fs:0x0,%eax`). There are no
+trailing table entries of any kind.
+
+> **Corrected twice.** The first version had the encoded column off by one
+> and omitted case 0. The second fixed that but then asserted "16 reachable
+> entries, not 235" alongside a `cmp $0xea` that makes 235 reachable, and
+> claimed ten dead entries past `0xFA` where there is one `int3`.
+>
+> Reproducing this section takes more than one tool: `re_pe.py --data` dumps
+> the two tables' bytes, and `re_fn.py` on a disassembly restarted at each
+> handler address gives its behaviour. `re_pe.py` alone yields the tables but
+> not the handlers.
 
 | case | FunIDs | size (`bl`) | encoded | meaning |
 |---|---|---|---|---|
@@ -357,13 +395,28 @@ The ten table entries past that hold out-of-range values and are dead data.
 | 6 | `0xf2` | 1 | `0x04` | |
 | 7 | `0xf3` | 1 | `0x08` | |
 | 8 | `0xf4` | 1 | `0x10` | |
-| 9 | `0xf5` | 4 | *increments* | |
-| 10 | `0xf6` | 4 | *increments* | |
-| 11 | `0xf7` | 3 | *increments* | |
-| 12 | `0xf8` | 3 | *zeroes* | |
-| 13 | `0xf9` | 2 | *increments* | |
-| 14 | `0xfa` | 2 | *zeroes* | |
-| 15 | `0x13`–`0xef` (213) | 5 | default | keyboard / media / combo |
+| 9 | `0xf5` | 4 | byte 1 as-is | |
+| 10 | `0xf6` | 4 | byte 1 negated | |
+| 11 | `0xf7` | 3 | byte 1 negated | |
+| 12 | `0xf8` | 3 | byte 1 as-is | |
+| 13 | `0xf9` | 2 | byte 1 negated | |
+| 14 | `0xfa` | 2 | byte 1 as-is | |
+| 15 | default (213) | 5 | default | keyboard / media / combo |
+
+The case-to-FunID mapping and every `size (bl)` above is read straight out of
+the two tables. Two details are worth being precise about:
+
+- **The default case is not the contiguous range `0x13`–`0xef`.** It is 213
+  FunIDs in three runs — `0x13`–`0x5a`, `0x5d`–`0x9f`, `0xa6`–`0xef` — because
+  `0x5b`, `0x5c` and `0xa0`–`0xa5` are carved out. That is the `221` FunIDs
+  of `0x13`–`0xef` minus the `8` special-cased ones.
+- **Cases 9–14 differ by more than a label.** All six clear `0x13(%esp)`,
+  which sends them down the table-lookup path at `0x40b175` instead of
+  writing a literal. Three of them (cases 10, 11, 13) additionally run
+  `not %al; inc %al` on byte 1 first, i.e. they negate it before the lookup.
+  Case 9 does **not** — an earlier revision of this table labelled it
+  "*increments*" and paired it with case 10, which is backwards; cases 9, 12
+  and 14 are the same plain variant.
 
 Two shapes fall out of this that were not visible before:
 
@@ -372,8 +425,8 @@ Two shapes fall out of this that were not visible before:
   candidate for the dedicated hardware buttons.
 - **`0xf5`–`0xfa` pair up**: `(0xf5, 0xf6)` both size 4, `(0xf7, 0xf8)` both
   size 3, `(0xf9, 0xfa)` both size 2, and within each pair one handler
-  *increments* the counter while the other *zeroes* it. That is the shape of
-  a pair of related settings, e.g. two sides of one function.
+  negates byte 1 while the other passes it through unchanged. That is the
+  shape of a pair of related settings, e.g. two sides of one function.
 
 Neither interpretation is confirmed. `text.xml` names DPI, RGB, profile
 switch and fire key as distinct hardware actions, so five flags fits — but
