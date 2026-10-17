@@ -8,15 +8,18 @@ emitting bytes as garbage instructions and never recovers, which makes
 `grep -A50 40b010` useless. Restarting the disassembly at a known function
 boundary recovers it:
 
-    objdump -d vendor/gui/app/OemDrv.exe > /tmp/OemDrv.asm
-    python3 tools/re_fn.py /tmp/OemDrv.asm 0x40b010
-    python3 tools/re_fn.py /tmp/OemDrv.asm 0x40b680 --count 60 --calls
+    objdump -d vendor/gui/app/OemDrv.exe > vendor/OemDrv.asm
+    python3 tools/re_fn.py vendor/OemDrv.asm 0x40b010
+    python3 tools/re_fn.py vendor/OemDrv.asm 0x40b680 --count 60 --calls
+
+Scratch goes in vendor/, not /tmp -- see the section of the same name in
+docs/GUI-ANALYSIS.md. A /tmp wipe has already destroyed this analysis once.
 
 With --calls it also lists the call targets inside the function, which is
 usually what you actually want when tracing a protocol routine.
 
 Usage:
-    python3 tools/re_fn.py DISASM VA [--count N] [--calls] [--no-int3]
+    python3 tools/re_fn.py DISASM VA [--count N] [--calls] [--keep-int3]
 """
 
 from __future__ import annotations
@@ -58,9 +61,13 @@ def main() -> int:
     rows = parse(args.disasm)
     start = next((i for i, (a, _, _, _) in enumerate(rows) if a == args.va), None)
     if start is None:
-        near = min(rows, key=lambda r: abs(r[0] - args.va))
-        print(f"address {args.va:#x} not found; nearest is {near[0]:#x}",
-              file=sys.stderr)
+        if not rows:
+            print(f"{args.disasm}: no instructions parsed "
+                  f"(not an objdump -d listing?)", file=sys.stderr)
+        else:
+            near = min(rows, key=lambda r: abs(r[0] - args.va))
+            print(f"address {args.va:#x} not found; nearest is {near[0]:#x}",
+                  file=sys.stderr)
         return 1
 
     print(f"function at 0x{args.va:08x}\n")
@@ -71,9 +78,15 @@ def main() -> int:
     for a, op, arg, raw in rows[start:]:
         if not args.keep_int3 and op == "int3":
             pad += 1
+            # pad counts a *consecutive* run, so it has to be cleared by any
+            # real instruction. Left cumulative, any function with two
+            # separate alignment gaps -- routine, since inter-block padding is
+            # CC CC CC -- trips the limit at the second gap and truncates
+            # early, which defeats the reason this tool exists.
             if pad > 3 and shown:
                 break
             continue
+        pad = 0
         if shown:
             print(raw)
             shown += 1
