@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # No pip install step, deliberately. The repo is standard library only by
+      # policy -- tools/ are ctypes/fcntl with no third-party packages -- and a
+      # CI job that quietly grew a requirements.txt would stop testing that.
+
+      - name: py_compile
+        run: python -m py_compile tools/*.py tests/*.py
+
+      # safety.py's self-check is pure policy evaluation over its own
+      # classification tables. It opens no device and sends no packet, which is
+      # what makes it a valid gate here.
+      #
+      # tools/verify_vendor_cmds.py --guard-test is deliberately NOT run: it
+      # opens /dev/hidraw*. The read-only guarantee is enforced in code
+      # (tools/safety.py) and asserted by the tests below, not by touching
+      # hardware from a hosted runner.
+      - name: safety policy self-check
+        run: python tools/safety.py
+
+      - name: tests
+        run: python -m unittest discover -s tests -v

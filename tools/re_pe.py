@@ -37,35 +37,70 @@ class PEError(Exception):
 class PE:
     def __init__(self, path: str):
         self.path = path
-        with open(path, "rb") as fh:
-            self.data = fh.read()
+        try:
+            with open(path, "rb") as fh:
+                self.data = fh.read()
+        except OSError as exc:
+            # A missing or unreadable vendor file is an expected condition,
+            # not a crash: this tool is pointed at paths that may not exist.
+            raise PEError(f"{path}: cannot read ({exc.strerror or exc})")
         self._parse()
+
+    # -- bounds-checked reads ----------------------------------------------
+    # Every offset in a PE header is attacker-controlled in the sense that
+    # matters here: the file is whatever someone dropped in vendor/, and it
+    # may be truncated, garbage, or a structurally valid image whose export
+    # directory points off the end of the file. struct.unpack_from raises
+    # struct.error on a short buffer, which is not a PEError and so escapes
+    # main()'s handler as a traceback. Route every read through these instead.
+
+    def _at(self, off: int, size: int, what: str) -> None:
+        if off < 0 or off + size > len(self.data):
+            raise PEError(
+                f"{self.path}: truncated -- {what} needs {size} byte(s) at "
+                f"0x{off:x} but the file is 0x{len(self.data):x} bytes")
+
+    def _u16(self, off: int, what: str) -> int:
+        self._at(off, 2, what)
+        return struct.unpack_from("<H", self.data, off)[0]
+
+    def _u32(self, off: int, what: str) -> int:
+        self._at(off, 4, what)
+        return struct.unpack_from("<I", self.data, off)[0]
+
+    def _u64(self, off: int, what: str) -> int:
+        self._at(off, 8, what)
+        return struct.unpack_from("<Q", self.data, off)[0]
 
     # -- parsing ----------------------------------------------------------
     def _parse(self) -> None:
         d = self.data
         if d[:2] != b"MZ":
             raise PEError(f"{self.path}: not a PE file (no MZ)")
-        pe_off = struct.unpack_from("<I", d, 0x3C)[0]
+
+        # e_lfanew lives at 0x3C, so anything under 0x40 bytes cannot hold it.
+        self._at(0x3C, 4, "e_lfanew")
+        pe_off = self._u32(0x3C, "e_lfanew")
+        self._at(pe_off, 4, "PE signature")
         if d[pe_off:pe_off + 4] != b"PE\0\0":
             raise PEError(f"{self.path}: bad PE signature")
 
         coff = pe_off + 4
-        n_sections, = struct.unpack_from("<H", d, coff + 2)
-        opt_size, = struct.unpack_from("<H", d, coff + 16)
+        n_sections = self._u16(coff + 2, "NumberOfSections")
+        opt_size = self._u16(coff + 16, "SizeOfOptionalHeader")
         opt = coff + 20
 
-        self.magic, = struct.unpack_from("<H", d, opt)
-        self.entry_rva, = struct.unpack_from("<I", d, opt + 16)
+        self.magic = self._u16(opt, "optional header magic")
+        self.entry_rva = self._u32(opt + 16, "AddressOfEntryPoint")
 
         # PE32 has a 4-byte BaseOfData at 24, so ImageBase is at 28.
         # PE32+ has no BaseOfData and an 8-byte ImageBase at 24.
         if self.magic == 0x10B:                     # PE32
-            self.image_base, = struct.unpack_from("<I", d, opt + 28)
+            self.image_base = self._u32(opt + 28, "ImageBase")
             # NumberOfRvaAndSizes sits at 92, so the directories start at 96.
             self._num_dd_offset = opt + 96
         elif self.magic == 0x20B:                   # PE32+
-            self.image_base, = struct.unpack_from("<Q", d, opt + 24)
+            self.image_base = self._u64(opt + 24, "ImageBase")
             self._num_dd_offset = opt + 112
         else:
             raise PEError(f"{self.path}: unknown optional header magic "
@@ -74,7 +109,8 @@ class PE:
 
         self.sections = []
         off = opt + opt_size
-        for _ in range(n_sections):
+        for i in range(n_sections):
+            self._at(off, 40, f"section header {i}")
             name = d[off:off + 8].rstrip(b"\0").decode("latin1")
             vsize, vaddr, rawsize, rawptr = struct.unpack_from("<IIII", d, off + 8)
             self.sections.append({
@@ -120,49 +156,108 @@ class PE:
         off = self._num_dd_offset + index * 8
         if off + 8 > self._opt_end:
             return (0, 0)
+        if off + 8 > len(self.data):
+            return (0, 0)
         return struct.unpack_from("<II", self.data, off)
 
     # -- exports ----------------------------------------------------------
     def exports(self) -> list[tuple[str, int, int]]:
         """[(name, ordinal, va)] sorted by va. Empty if not exported."""
-        exp_rva, exp_size = self.directory(0)
+        exp_rva, _exp_size = self.directory(0)
         if not exp_rva:
             return []
         eo = self.rva_to_offset(exp_rva)
         if eo is None:
             return []
-        (_flags, _ts, _mj, _mn, _name_rva, ord_base, n_addr, n_names,
-         addr_rva, names_rva, ords_rva) = struct.unpack_from(
-            "<IIHHIIIIIII", self.data, eo)
+
+        # 40-byte IMAGE_EXPORT_DIRECTORY.
+        self._at(eo, 40, "export directory")
+        ord_base = self._u32(eo + 16, "export Base")
+        n_addr = self._u32(eo + 20, "export NumberOfFunctions")
+        n_names = self._u32(eo + 24, "export NumberOfNames")
+        addr_rva = self._u32(eo + 28, "export AddressOfFunctions")
+        names_rva = self._u32(eo + 32, "export AddressOfNames")
+        ords_rva = self._u32(eo + 36, "export AddressOfNameOrdinals")
         if not n_names:
             return []
+
         names_off = self.rva_to_offset(names_rva)
         addrs_off = self.rva_to_offset(addr_rva)
         ords_off = self.rva_to_offset(ords_rva)
         if None in (names_off, addrs_off, ords_off):
             return []
+
+        # NumberOfNames indexes both the name-pointer and the ordinal arrays,
+        # so one check covers both. Without it a structurally valid PE whose
+        # n_names is larger than the arrays it points at reads past them.
+        self._at(names_off, 4 * n_names, "export name-pointer array")
+        self._at(ords_off, 2 * n_names, "export ordinal array")
+        self._at(addrs_off, 4 * n_addr, "export function-address array")
+
         out = []
+        skipped = 0
         for i in range(n_names):
-            name_rva, = struct.unpack_from("<I", self.data, names_off + 4 * i)
+            name_rva = self._u32(names_off + 4 * i, f"export name pointer {i}")
             no = self.rva_to_offset(name_rva)
             name = "" if no is None else \
                 self.data[no:].split(b"\0")[0].decode("latin1")
-            oi, = struct.unpack_from("<H", self.data, ords_off + 2 * i)
-            fn_rva, = struct.unpack_from("<I", self.data, addrs_off + 4 * oi)
+            oi = self._u16(ords_off + 2 * i, f"export ordinal {i}")
+            # The ordinal indexes the *functions* array, not the names array,
+            # so it is bounded by n_addr -- a different, usually smaller,
+            # count. An out-of-range oi is corrupt, not fatal: skip it.
+            if oi >= n_addr:
+                skipped += 1
+                continue
+            fn_rva = self._u32(addrs_off + 4 * oi, f"export function address {oi}")
             out.append((name, ord_base + oi, self.image_base + fn_rva))
+        if skipped:
+            print(f"warning: {skipped} export name(s) had an ordinal index "
+                  f">= NumberOfFunctions ({n_addr}); skipped", file=sys.stderr)
         return sorted(out, key=lambda e: e[2])
 
     def hexdump(self, off: int, length: int = 64, width: int = 16) -> str:
         lines = []
-        va = self.offset_to_va(off)
         for base in range(off, min(off + length, len(self.data)), width):
             chunk = self.data[base:base + width]
             hexpart = " ".join(f"{b:02x}" for b in chunk)
             ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+            # A dump long enough to run past the end of its section leaves
+            # unmapped offsets, which have no VA to print.
             va_here = self.offset_to_va(base)
-            lines.append(f"  {va_here:08x}  {hexpart:<{width * 3}}"
+            va_txt = f"{va_here:08x}" if va_here is not None else "--------"
+            lines.append(f"  {va_txt}  {hexpart:<{width * 3}}"
                          f"  |{ascii_part}|")
         return "\n".join(lines)
+
+
+def _int_arg(text: str) -> int:
+    """argparse type= for a hex-or-decimal integer.
+
+    Without this, a typo reaches int() inside main() and surfaces as a raw
+    ValueError traceback instead of a usage error.
+    """
+    try:
+        return int(text, 0)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not an integer (try 0x40b680 or 1234)")
+
+
+def _data_arg(text: str) -> tuple[int, int]:
+    """argparse type= for VA:LEN, e.g. 0x5a1a6c:64."""
+    va_s, sep, len_s = text.partition(":")
+    if not sep:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not VA:LEN (try 0x5a1a6c:64)")
+    try:
+        va = int(va_s, 0)
+        n = int(len_s, 0) if len_s else 64
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not VA:LEN with hex-or-decimal parts (try 0x5a1a6c:64)")
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"{text!r}: length must not be negative")
+    return va, n
 
 
 def main() -> int:
@@ -171,9 +266,9 @@ def main() -> int:
     ap.add_argument("path")
     ap.add_argument("--sections", action="store_true")
     ap.add_argument("--exports", action="store_true")
-    ap.add_argument("--where", metavar="VA",
+    ap.add_argument("--where", metavar="VA", type=_int_arg,
                     help="report which section and file offset a VA lands in")
-    ap.add_argument("--data", metavar="VA:LEN",
+    ap.add_argument("--data", metavar="VA:LEN", type=_data_arg,
                     help="hexdump LEN bytes at a VA")
     args = ap.parse_args()
 
@@ -184,16 +279,14 @@ def main() -> int:
           f"entry=0x{pe.image_base + pe.entry_rva:08x}  "
           f"{len(pe.data)} bytes")
 
-    if args.where:
-        va = int(args.where, 0)
+    if args.where is not None:
+        va = args.where
         off = pe.va_to_offset(va)
         print(f"  VA 0x{va:08x}: section {pe.section_of_va(va)}, "
               f"file offset {'0x%x' % off if off is not None else 'unmapped'}")
 
-    if args.data:
-        va_s, _, len_s = args.data.partition(":")
-        va = int(va_s, 0)
-        n = int(len_s, 0) if len_s else 64
+    if args.data is not None:
+        va, n = args.data
         off = pe.va_to_offset(va)
         if off is None:
             print(f"  VA 0x{va:08x} is unmapped")

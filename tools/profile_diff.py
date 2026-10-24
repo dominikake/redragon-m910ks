@@ -29,6 +29,7 @@ The baseline lives in the repo state dir, so it survives across runs.
 from __future__ import annotations
 
 import argparse
+import errno as _errno
 import os
 import sys
 import time
@@ -50,11 +51,19 @@ CMD_CONFIG = 0x21
 BASELINE = os.path.join(STATE_DIR, "config-baseline.bin")
 
 
-def read_config(dev: SinoWealthDevice, retries: int = 3) -> bytes | None:
+def read_config(dev: SinoWealthDevice, retries: int = 3,
+                errors: list | None = None) -> bytes | None:
     """
-    Read the config blob. Returns None if the mouse is asleep and will not
-    wake -- which is NOT the same as an empty read, and must not be recorded
-    as one.
+    Read the config blob. Returns None if no read succeeded.
+
+    None does NOT mean "asleep". A short read, a stalled control transfer and
+    a permissions problem all land here, and they have different fixes --
+    docs/GUI-ANALYSIS.md records a 520-byte read stalling into EPIPE, which
+    "looks like a dead device but is not one". So collect the errno into
+    `errors` (if given) and let the caller say something true.
+
+    A None result is NOT the same as an empty read, and must never be
+    recorded as one.
     """
     safety.guard_command(CMD_CONFIG)
     from sinowealth import REPORT_ID_CMD  # local: only needed on this path
@@ -67,13 +76,48 @@ def read_config(dev: SinoWealthDevice, retries: int = 3) -> bytes | None:
             )
             time.sleep(0.25)
             reply = dev.get_feature_report(REPORT_ID_CONFIG, REPORT_SIZE_CONFIG)
-        except OSError:
+        except OSError as exc:
+            if errors is not None:
+                errors.append(exc.errno)
             time.sleep(0.4)
             continue
         if len(reply) >= 2 and reply[1] == CMD_CONFIG:
             return reply
+        if errors is not None:
+            # Not an error, but not a usable answer either: the device
+            # answered, just not with our command echoed back.
+            errors.append(_errno.EPROTO)
         time.sleep(0.4)
     return None
+
+
+# What each failure errno most likely means for *this* tool, and what to do
+# about it. Ordered most-specific first.
+_READ_FAILURES = (
+    (_errno.EACCES, _errno.EPERM,
+     "permission denied on the hidraw node -- add a udev rule, or re-run "
+     "with sufficient access (see install.sh)"),
+    (_errno.ENODEV, _errno.ENXIO,
+     "the device went away -- unplug it, plug it back in, retry"),
+    (_errno.EPIPE,
+     "the control transfer stalled mid-read. A sleeping mouse looks exactly "
+     "like this, so nudge the mouse and retry -- but it is not proof the "
+     "device is dead"),
+    (_errno.EPROTO,
+     "the device answered, but not with cmd 0x21 echoed in byte 1"),
+)
+
+
+def explain_read_failure(errnos: list) -> str:
+    """One honest line about why the read did not produce a blob."""
+    if not errnos:
+        return ("no error was reported, so the mouse is probably asleep -- "
+                "move it while watching, then run this again")
+    for codes, text in _READ_FAILURES:
+        if any(e in codes for e in errnos):
+            return text
+    names = ", ".join(sorted({_errno.errorcode.get(e, str(e)) for e in errnos}))
+    return f"reads failed with: {names}"
 
 
 def diff(a: bytes, b: bytes, label_a="baseline", label_b="current") -> list:
@@ -137,15 +181,15 @@ def main() -> int:
         deadline = time.time() + args.seconds
         seen: set = set()
         reads = stalled = 0
+        errnos: list = []
         with open_device() as dev:
             while time.time() < deadline:
-                blob = read_config(dev)
+                blob = read_config(dev, errors=errnos)
                 if blob is None:
                     stalled += 1
                     if stalled == 3 and reads == 0:
-                        print("  still no response -- the mouse is probably "
-                              "asleep.\n  MOVE IT (or click a button) and keep "
-                              "waiting.\n")
+                        print("  still no response -- nudge the mouse and "
+                              "keep waiting.\n")
                     time.sleep(args.every)
                     continue
                 reads += 1
@@ -162,11 +206,11 @@ def main() -> int:
 
         # Without this, "nothing changed" and "never managed to read at all"
         # print the same thing, and the second one makes the run worthless.
-        print(f"\nreads: {reads} successful, {stalled} stalled (asleep) "
+        print(f"\nreads: {reads} successful, {stalled} unsuccessful "
               f"out of {reads + stalled} attempts")
         if reads == 0:
-            print("\nNO READS AT ALL -- the mouse never woke up. "
-                  "Move it while watching, then run this again.")
+            print("\nNO SUCCESSFUL READS.")
+            print(f"  {explain_read_failure(errnos)}")
             return 2
         if seen:
             print("offsets that moved at least once: "
@@ -177,12 +221,13 @@ def main() -> int:
                   "which is itself an answer")
         return 0
 
+    errnos: list = []
     with open_device() as dev:
-        blob = read_config(dev)
+        blob = read_config(dev, errors=errnos)
 
     if blob is None:
-        print("could not read the config blob -- mouse asleep?", file=sys.stderr)
-        print("move the mouse and retry", file=sys.stderr)
+        print("could not read the config blob", file=sys.stderr)
+        print(f"  {explain_read_failure(errnos)}", file=sys.stderr)
         return 2
 
     if args.baseline:
