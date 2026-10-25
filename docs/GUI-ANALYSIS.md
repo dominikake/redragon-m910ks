@@ -610,9 +610,23 @@ Stated plainly, because these matter for anyone considering writes.
    hatch until this is confirmed.
 3. The field layout of the 520-byte config blob. Partly resolved (#6): the
    general block at `[8..0x99]` is now mapped. The remaining un-decoded span
-   is `[0x99..0x207]`.
+   is `[0x99..0x207]` — and on the dongle that span is **entirely zero**, so
+   it cannot be mapped from a dongle capture at all. A wired-mouse capture is
+   needed.
+
+   The button-differential route is **closed** (#3). This model has no
+   profile button, and DPI+/DPI−, the light-mode toggle and the report-rate
+   switch emit no HID events — they are handled in firmware. Watching both
+   input nodes through a prompted session, the only key that ever reached the
+   host was `BTN_LEFT`; meanwhile the `0x21` blob did not move a single byte,
+   and is byte-identical to the 2026-10-17 capture. The active DPI level,
+   lighting mode and report rate are **not** persisted into this blob: the
+   DPI table at offset 13 is the five configured levels, not the selected one.
 4. Why the dongle answers `0x21` but stalls `0x11` / `0x31`, while the
-   wired mouse answered `0x11`. Needs a wired-vs-dongle comparison.
+   wired mouse answered `0x11`. Needs a wired-vs-dongle comparison. The
+   "cycle the profile with the mouse's own button" test is not possible — this
+   model has no profile button; profiles are software-only, so switching them
+   needs the gated write path.
 5. The meaning of the special FunIDs `0x5b`/`0x5c` and the `0xf0`–`0xfa`
    group.
 
