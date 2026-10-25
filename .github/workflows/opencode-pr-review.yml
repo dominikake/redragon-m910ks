@@ -59,7 +59,6 @@ jobs:
       - name: AI review
         id: ai
         if: steps.size.outputs.too_large == 'false'
-        continue-on-error: true
         uses: anomalyco/opencode/github@latest
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -83,7 +82,12 @@ jobs:
         run: |
           echo "::notice::AI review skipped: PR is too large. Review manually."
 
-      - name: Failure notice for AI review
-        if: steps.ai.outcome == 'failure'
+      - name: Explain an AI review that did not run
+        if: failure() && steps.ai.outcome == 'failure'
         run: |
-          echo "::notice::AI review failed to run (provider flake). Review manually."
+          echo "::error::The AI review step failed before posting a review."
+          echo "This check is red on purpose. It previously ran with continue-on-error,"
+          echo "which turned a provider failure into a passing check with no review behind it."
+          echo "Most likely causes: the Workers AI daily allocation (10,000 neurons) is"
+          echo "exhausted, or the endpoint streamed a malformed delta. The ai step log has"
+          echo "the provider error. Review this PR manually."
