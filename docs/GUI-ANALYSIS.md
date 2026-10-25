@@ -93,30 +93,54 @@ python3 tools/re_pe.py vendor/gui/app/OemDrv.exe --where 0x40b680
 python3 tools/re_pe.py vendor/gui/app/OemDrv.exe --data 0x40b284:0x20
 
 # 2. Disassemble once. objdump -d linear sweep, ~500k instructions.
-objdump -d vendor/gui/app/OemDrv.exe > /tmp/OemDrv.asm
+objdump -d vendor/gui/app/OemDrv.exe > vendor/OemDrv.asm
 
 # 3. Recover the command table from the call sites.
-python3 tools/re_cmds.py /tmp/OemDrv.asm
+python3 tools/re_cmds.py vendor/OemDrv.asm
 
 # 4. Read one function. objdump loses instruction alignment in data regions
 #    near 0x40b000 and never recovers, so restarting at a known function
 #    boundary is the only way to read that code.
-python3 tools/re_fn.py /tmp/OemDrv.asm 0x40b010 --calls
+python3 tools/re_fn.py vendor/OemDrv.asm 0x40b010 --calls
 ```
 
-`re_cmds.py` on its own reproduces the whole command table in this document:
+`re_cmds.py` recovers every call site into `SendCmd`/`GetCmd` and prints the
+immediates written into the argument struct just before each one:
+
+```
+503866 instructions parsed, 6 call site(s) into SendCmd/GetCmd
+look-back window: 60 instruction(s)
+
+call site    fn       command bytes written just before
+--------------------------------------------------------------
+0x0040a325   SendCmd  0x40a320=0x01
+0x0040a41d   SendCmd  0x40a3ed=0x11  0x40a3f9=0x21  0x40a409=0x31
+0x0040a553   GetCmd   0x40a4fe=0x00  0x40a510=0x11  0x40a51c=0x21  0x40a528=0x31  0x40a538=0x92
+0x0040a5cd   SendCmd  0x40a5c0=0x90
+0x0040a727   GetCmd   0x40a6ae=0x00  0x40a6c0=0x12  0x40a6cc=0x22  0x40a6d8=0x32  0x40a6eb=0x50  0x40a6f0=0xa5
+0x0040a7fb   GetCmd   0x40a7a5=0x30  0x40a7aa=0x02  0x40a7af=0x00
+```
+
+This is **not** a command list on its own. The tool reports every `movb`
+immediate in the contiguous run before the call, and only the first one is
+the command byte — the rest are packet fields. Of the values above, `0x50`
+and `0xa5` are the `SetMatrix` length/terminator pair, `0x02` and `0x00` are
+`SetMacro` header bytes, and `0x00` is a length. Reading the command ids off
+the first column of each row gives:
 
 ```
 0x40a325 SendCmd  0x01
 0x40a41d SendCmd  0x11 0x21 0x31
 0x40a553 GetCmd   0x11 0x21 0x31 0x92
 0x40a5cd SendCmd  0x90
-0x40a727 GetCmd   0x12 0x22 0x32 0x50 0xa5
-0x40a7fb GetCmd   0x30 0x02
+0x40a727 GetCmd   0x12 0x22 0x32
+0x40a7fb GetCmd   0x30
 ```
 
 Note that `0x12`, `0x22`, `0x32` and `0x30` — the four the echo-oracle sweep
-could not see — fall straight out of the disassembly.
+could not see — fall straight out of the disassembly. All six call sites stop
+at a real `int3` boundary rather than the window edge, so nothing is being
+attributed across a function boundary.
 
 ## Device module: `CDrvBY24G`
 
