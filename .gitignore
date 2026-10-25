@@ -15,3 +15,7 @@ state/
 # Editor / OS noise
 *.swp
 .DS_Store
+
+# Git worktrees used for parallel issue work. The directories are working
+# copies, not repo content -- `git add -A` must not sweep them in.
+.worktrees/
