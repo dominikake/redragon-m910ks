@@ -78,6 +78,19 @@ NO_BYTES = """\
   40a606:\tcall   0x409f80
 """
 
+# objdump caps the byte column at 7 bytes and spills the rest onto a
+# continuation line: an address and bytes, but no mnemonic. The movl here is 8
+# bytes, so it is printed on two lines. Read the spill as its own instruction
+# and the real one comes out 7 bytes long, the next address overshoots by one,
+# and the walk stops on a gap that does not exist -- dropping the 0x90 movb
+# that the command table depends on.
+WRAPPED = """\
+  40a5c0:\tc6 44 24 14 90       \tmovb   $0x90,0x14(%esp)
+  40a5c5:\tc7 44 24 15 00 00 00 \tmovl   $0x0,0x15(%esp)
+  40a5cc:\t00 
+  40a5cd:\te8 ae f9 ff ff       \tcall   0x409f80
+"""
+
 
 def rows(text: str):
     fd, path = tempfile.mkstemp(suffix=".asm", text=True)
@@ -98,9 +111,31 @@ class TestInsnLength(unittest.TestCase):
     def test_every_parsed_row_has_a_length(self):
         # INSN only matches a complete space-terminated byte group, so the
         # contiguity check never has to cope with an unknown length.
-        for fixture in (CLEAN, DISCONTINUOUS, HAS_BAD):
+        for fixture in (CLEAN, DISCONTINUOUS, HAS_BAD, WRAPPED):
             for _addr, _op, _arg, n in rows(fixture):
                 self.assertIsInstance(n, int)
+
+
+class TestObjdumpContinuationRows(unittest.TestCase):
+    def test_spill_line_is_folded_into_the_instruction_length(self):
+        r = rows(WRAPPED)
+        # Three real instructions, not four: the spill is not an instruction.
+        self.assertEqual([a for a, _op, _arg, _n in r],
+                         [0x40A5C0, 0x40A5C5, 0x40A5CD])
+        self.assertEqual(r[1][3], 8)        # 7 bytes + the 1 that spilled
+        self.assertEqual(r[1][1], "movl")   # still a movl, not "00"
+
+    def test_a_wrapped_instruction_is_not_a_gap(self):
+        hits = re_cmds.extract(rows(WRAPPED), SEND, GET)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual([v for _, v in hits[0]["bytes"]], [0x90])
+        self.assertNotIn("address gap", hits[0]["stop"])
+
+    def test_spill_line_never_becomes_a_mnemonic(self):
+        # Regression guard for the parse bug itself: a byte pair in the
+        # mnemonic slot is what made the false gap possible.
+        for _addr, op, _arg, _n in rows(WRAPPED):
+            self.assertNotRegex(op, r"^[0-9a-f]{2}$")
 
 
 class TestParse(unittest.TestCase):
@@ -178,10 +213,25 @@ class TestExtractContiguity(unittest.TestCase):
 """)
         self.assertEqual(re_cmds.extract(rc, SEND, GET), [])
 
-    def test_default_window_is_the_short_one(self):
-        # 60 absorbed unrelated frames; the docstring says 14 suffices for the
-        # short query routines, with --window 60 reserved for the bulk writers.
-        self.assertEqual(re_cmds.DEFAULT_WINDOW, 14)
+    def test_default_window_is_deep_enough_for_every_call_site(self):
+        # 14 looked sufficient because the short query routines fit, but
+        # GetCmd at 0x40a727 and 0x40a7fb build a larger frame first. At 14
+        # a bare run reports 3 of the 6 real call sites; the docs quote all
+        # six, so the default has to reach them.
+        self.assertEqual(re_cmds.DEFAULT_WINDOW, 60)
+
+    def test_a_deep_call_site_survives_the_default_window(self):
+        # A function that builds its argument struct well before the call:
+        # the movb is 20 instructions back, past a window of 14.
+        nops = "".join(f"  {i:04x}:\t90                   \tnop\n"
+                       for i in range(0x40A714, 0x40A728))
+        text = ("  40a70f:\tc6 44 24 18 30       \tmovb   $0x30,0x18(%esp)\n"
+                + nops
+                + "  40a728:\te8 53 f8 ff ff       \tcall   0x409f80\n")
+        hits = re_cmds.extract(rows(text), SEND, GET)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual([v for _, v in hits[0]["bytes"]], [0x30])
+        self.assertIn("window of", hits[0]["stop"])
 
 
 class TestWindowing(unittest.TestCase):

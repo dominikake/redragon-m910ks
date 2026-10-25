@@ -41,13 +41,28 @@ import sys
 # successor must begin at prev+N.
 INSN = re.compile(
     r"^\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} )+)\s*(\S+)\s*(.*)$")
+
+# objdump prints at most 7 bytes of an instruction on its first line and
+# spills the rest onto a continuation line that has an address and bytes but
+# no mnemonic. `movl $0x0,0x15(%esp)` is 8 bytes, so it lands on two lines.
+# Without the merge below those spill lines parse as real instructions named
+# "00" (or "ff"), the length of the instruction they belong to comes out
+# short, and the contiguity check reports a gap that is not there -- which
+# silently truncates the walk and drops the command byte behind it.
+CONT = re.compile(r"^\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} )+)\s*$")
+
 CALL = re.compile(r"^call\s+0x([0-9a-f]+)$")
 MOVB_IMM = re.compile(r"^movb\s+\$0x([0-9a-f]+),")
 
 DEFAULT_SEND = 0x409F80     # SendCmd
 DEFAULT_GET = 0x40A150      # GetCmd
 
-DEFAULT_WINDOW = 14         # enough for the short query routines
+# 60, not 14. The short query routines do finish inside 14 instructions, but
+# GetCmd at 0x40a727 and 0x40a7fb build a larger frame first and need 30+.
+# A default of 14 silently reports 3 of the 6 real call sites, so a bare
+# `python3 tools/re_cmds.py vendor/OemDrv.asm` stops reproducing the table
+# docs/GUI-ANALYSIS.md quotes.
+DEFAULT_WINDOW = 60
 
 
 def insn_length(byte_col: str) -> int:
@@ -60,15 +75,29 @@ def insn_length(byte_col: str) -> int:
 
 
 def parse(path: str) -> list[tuple[int, str, str, int]]:
-    """[(addr, mnemonic, operands, length)] from objdump -d output."""
+    """[(addr, mnemonic, operands, length)] from objdump -d output.
+
+    Continuation lines are folded into the length of the instruction they
+    spill from. Every such line in a full OemDrv.exe dump begins exactly at
+    prev_addr + prev_len, so the arithmetic is unambiguous; a line that does
+    not follow on is left alone and the contiguity check will stop there.
+    """
     rows = []
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
-            m = INSN.match(line.rstrip("\n"))
+            raw = line.rstrip("\n")
+            m = INSN.match(raw)
             if m:
-                rows.append((int(m.group(1), 16), m.group(3),
-                             m.group(4).strip(), insn_length(m.group(2))))
-    return rows
+                rows.append([int(m.group(1), 16), m.group(3),
+                             m.group(4).strip(), insn_length(m.group(2))])
+                continue
+            c = CONT.match(raw)
+            if c and rows:
+                addr, n = int(c.group(1), 16), len(c.group(2).split())
+                prev = rows[-1]
+                if addr == prev[0] + prev[3]:
+                    prev[3] += n
+    return [tuple(r) for r in rows]
 
 
 def extract(rows, send: int, get: int, window: int = DEFAULT_WINDOW) -> list[dict]:
@@ -90,9 +119,10 @@ def extract(rows, send: int, get: int, window: int = DEFAULT_WINDOW) -> list[dic
     past the first gap is dropped, so an immediate on the far side of a gap is
     never attributed -- which is the conservative direction.
 
-    `window` is how far back to look. 14 is enough for the short query
-    routines; the bulk writers (SetMatrix, SetMacro) build a large frame
-    first, so pass --window 60 for those.
+    `window` is how far back to look. The default is deliberately generous:
+    GetCmd at 0x40a727 and 0x40a7fb need 30+ instructions, so a tight window
+    reports fewer call sites than exist. Truncation is visible in the output
+    as "stopped at window of N".
     """
     hits = []
     for idx, (addr, op, arg, _n) in enumerate(rows):
@@ -142,7 +172,7 @@ def main() -> int:
     ap.add_argument("--get", type=lambda s: int(s, 0), default=DEFAULT_GET)
     ap.add_argument("--window", type=int, default=DEFAULT_WINDOW,
                     help="instructions to look back for movb immediates "
-                         f"(default {DEFAULT_WINDOW}; the bulk writers need 60)")
+                         f"(default {DEFAULT_WINDOW})")
     args = ap.parse_args()
 
     rows = parse(args.disasm)
