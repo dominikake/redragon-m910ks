@@ -322,6 +322,176 @@ Two things worth keeping:
 2. The write is split across four separate commands, not one blob dump —
    general block, PSD, macro, then key matrix.
 
+## The general block — `0x40b750` and `0x40b9f0`
+
+These two are the "General(Save)" half of `Apply_24G`. They do not build a
+packet from scratch: `GetConfig` has already filled the buffer with the
+device's current block, and each packer overwrites only the fields it owns.
+
+```
+GetConfig(profile)       0x40a3c0   0x11/0x21/0x31, reads 0x207 bytes
+  packer 1               0x40b750   DPI levels, report rate, level colours
+  packer 2               0x40b9f0   LED mode table
+SetGeneral(profile, buf) 0x40a4d0   0x11/0x21/0x31, writes 0x92 bytes
+```
+
+`SetGeneral` copies exactly **`0x92` = 146 bytes** out of the buffer
+(`push $0x92` at `0x40a52d`, then the `memcpy` at `0x40a53d`). So the
+general block is reply bytes **`[8..0x99]`**, and `esi` inside both packers
+is the block base, not the reply base. Two writes pin that down against the
+captured blob:
+
+| instruction | writes | blob offset | capture |
+|---|---|---|---|
+| `movb $0x64,(%esi)` at `0x40b75d` | `esi[0x00]` | `[8]` | `0x64` |
+| `movb $0xa5,0x90(%esi)` at `0x40ba2f` | `esi[0x90]` | `[0x98]` | `0xa5` |
+
+Because the buffer came from `GetConfig`, **any byte neither packer writes
+is echoed back unchanged**. This answers the long-standing "what is byte 9"
+question: nothing writes `esi[1]`, in either packer. It is whatever the
+device returned — `0x13` on the wired and the dongle read alike — not a
+field this code understands. It survives a save because the vendor app
+round-trips the whole 146-byte block, not because it means anything.
+
+### Packer 1 — `0x40b750` (DPI, report rate, level colours)
+
+The profile record is `0x9e4 + profile * 0x62c` (`0x40b7a4`); per-level
+records are 16 bytes apart from `ebp + 0x24`:
+
+| offset | field |
+|---|---|
+| `+0x00` | X DPI value (an entry from the `DPISET` ladder) |
+| `+0x04` | Y DPI value, used only when the dual-axis flag is set |
+| `+0x08` | level colour, RGB + pad |
+| `+0x0c` | `0` = level in use, non-zero = disabled |
+
+Writes, in order:
+
+| address | target | value |
+|---|---|---|
+| `0x40b75d` | `esi[0x00]` | `0x64`, constant |
+| `0x40b7b0`–`0x40b7de` | — | report-rate comparand against `0x125`/`0x250`/`0x500`/`0x1000` |
+| `0x40b7e8` | `esi[0x02]` bits 0–3 | rate code 1–4 |
+| `0x40b7ed`–`0x40b7ff` | `esi[0x05..0x24]` | zero: both DPI tables |
+| `0x40b820`–`0x40b864` | `esi[0x05+2i]` | X DPI, packed |
+| `0x40b843`–`0x40b85c` | `esi[0x15+2i]` | Y DPI, packed, only if dual-axis |
+| `0x40b8c1` | `esi[0x03]` | enabled count (low nibble), active position (high nibble) |
+| `0x40b8cc`/`0x40b8d2` | `esi[0x02]` bit 7 | dual-axis flag |
+| `0x40b8d6`–`0x40b9e5` | `esi[0x25..]` | per-level RGB triples |
+
+Two things here were previously guessed wrong.
+
+**The DPI values are ladder indices, not DPI counts, and the ladder is not a
+uniform 250-step scale.** The comparands for report rate are `0x125`,
+`0x250`, `0x500`, `0x1000` — the vendor's decimal labels `125/250/500/1000`
+typed as hex, which is why they look like nonsense integers. The DPI side
+goes through a lookup (`0x40e5e0`) over the `DPISET` ladder in `Cfg.ini`,
+`250,500,750,1000,1200,1500,1750,2000,2250,2400,2750,3000,…`, and the wire
+value is the **1-based index into that ladder**:
+
+| level | DPI | `DPISET` index | wire |
+|---|---|---|---|
+| 1 | 500 | 1 | `0x0002` |
+| 2 | 1000 | 3 | `0x0004` |
+| 3 | 2000 | 7 | `0x0008` |
+| 4 | 3000 | 11 | `0x000c` |
+| 5 | 4000 | 15 | `0x0010` |
+
+`index + 1` reproduces all five captured values exactly; `DPI / 250` happens
+to agree for these five and diverges above 2000, where the ladder switches
+to 500 steps. `tools/decode_general_block.py` uses the ladder.
+
+**The two DPI tables are packed, not slotted.** The cursor only advances for
+levels whose flag is `0` (`add $0x2,%ebx` at `0x40b864` sits inside the
+enabled branch), so five enabled levels occupy ten bytes and the remaining
+slots stay zero. That is why `[13..0x1c]` looks like a fixed table on this
+device and would not on a mouse with fewer levels enabled.
+
+`esi[0x15..0x24]` — blob `[0x1d..0x2c]` — is the **Y-axis DPI table**. It is
+zero here only because bit 7 of `[10]` is clear: this sensor exposes a
+single DPI axis. The bytes were previously listed as "zero, unknown"; they
+are a second packed table.
+
+Level colours are packed the same way — one RGB triple per *enabled* level,
+starting at `esi[0x25]` — so five enabled levels write blob `[0x2d..0x3b]`
+and stop. The capture also has triples at `[0x3c..0x44]` (cyan, white,
+orange). Those were **not written by this app**: they are echoed from the
+device. They match nothing in `Cfg.ini` (whose `DC=` default has five
+colours), so the device's factory image carries more level colours than the
+vendor tool can express.
+
+`movb $0x0,0x9e(%esi)` at `0x40b78d` is a **dead store**: `esi[0x9e]` is
+blob `[0xa6]`, well past the 146-byte body, so it never reaches the device.
+It only makes sense if this routine once serialised a longer block.
+
+### Packer 2 — `0x40b9f0` (the LED mode table)
+
+This is `LedOpt1..LedOpt10` from `Cfg.ini`, whose own comment names the five
+fields: `;Speed  Light  Direct  Random  ColorNum`. The app parses each
+`LedOpt%d` with `sscanf`-style code at `0x4401ec` and stores the five values
+as dwords, with an in-use flag at `-0xc`. The packer then serialises them in
+a fixed, non-uniform layout:
+
+| blob offset | field |
+|---|---|
+| `0x45` | active LED mode (`esi[0x3d]`, see below) |
+| `0x46` | mode 1 byte: high nibble `Light`, low nibble `Speed` |
+| `0x47` | mode 1: `(Random == 3)` |
+| `0x48` | mode 2 byte |
+| `0x49..0x4b` | mode 2: one colour |
+| `0x4c` | mode 3 byte |
+| `0x4d` | mode 3: colour count |
+| `0x4e..0x62` | mode 3: up to 7 colours |
+| `0x63` | mode 4 byte (low nibble only) |
+| `0x64` | mode 5 byte |
+| `0x65` | mode 6 byte |
+| `0x66..0x83` | mode 6: 10 colour slots |
+| `0x84` | mode 7 byte |
+| `0x85..0x8a` | mode 7: two colours |
+| `0x8b` | mode 8 byte |
+| `0x8c` | mode 9 byte |
+| `0x8d` | mode 10 byte (low nibble only) |
+| `0x8e..0x97` | logo LED options + colour — **echoed**, not written here |
+| `0x98` | `0xa5` constant |
+| `0x99` | echoed `0x00` |
+
+Colours are 3 bytes on the wire and 4 bytes in the app's record, which is
+why the copy loop advances the destination by 3 and the source by 4
+(`0x40baa0`).
+
+The `LedOpt` identification is not a guess — the per-mode colour counts
+match `Cfg.ini` exactly:
+
+| mode | `Cfg.ini` | blob |
+|---|---|---|
+| 2 | `LedOpt2=0,1,0,0,1` | 1 colour at `[0x49]` |
+| 3 | `LedOpt3=1,0,0,0,7` | count `7` at `[0x4d]`, 7 colours |
+| 6 | `LedOpt6=0,0,0,0,5` | 5 colours at `[0x66]` (+1 duplicate, below) |
+| 7 | `LedOpt7=0,0,0,0,2` | 2 colours at `[0x85]` |
+
+Mode 3's seven colours are a rainbow — red, green, blue, magenta, yellow,
+orange, cyan — and the last is followed by mode 4's byte at `[0x63]`.
+
+Three quirks in this packer, all observed rather than inferred:
+
+1. **Mode 6 can gain an extra colour.** If `Cfg.ini`'s `WuYU` option is
+   non-zero (it is `1` by default) the packer duplicates the last colour
+   (`0x40bc14`–`0x40bc31`), so `LedOpt6` with 5 colours puts 6 triples on
+   the wire. That is the only reason `[0x77..0x79]` repeats yellow.
+2. **Mode 3 has room for seven colours, not eight.** The count is capped at
+   8 (`0x40ba5b`) but the field only runs to `esi[0x5a]`; an eighth triple
+   would overwrite modes 4–6. The app's own default is 7, so it never hits
+   this.
+3. **The last entry is never written.** The loop runs to `ebp == N` and
+   skips the body for that entry (`0x40bacc`–`0x40bad2`), where `N` is the
+   number of leading `LedOpt` records with the in-use flag set. With all ten
+   defined, modes 1–9 are written and mode 10 is left as read. `[0x8d] =
+   0x02` is therefore device state, not app output.
+
+`esi[0x3d]` (blob `[0x45]`) is derived, not copied: the stored active index
+is incremented and wraps to `0` when it equals `N-1` (`0x40ba1c`–`0x40ba2c`).
+On this device it is `1`.
+
 ## Key / button model
 
 The profile file format is explicit:
@@ -543,37 +713,72 @@ is consistent with the latter — but it is **not established**.
 0090  00 00 00 01 02 ff 00 00 a5 00 00 00 00 00 00 00   |................|
 ```
 
-Offsets `0x000`–`0x09f` shown contiguously; the blob is 520 bytes and the
-rest is not yet mapped. Raw copy kept out of git; re-read it any time with
+Offsets `0x000`–`0x09f` shown contiguously; the blob is 520 bytes. The
+general block the packers own runs from `[8]` to `[0x99]`; everything from
+`[0x9a]` onward is zero in both captures and belongs to other commands (see
+below). Raw copy kept out of git; re-read it any time with
 `python3 tools/verify_vendor_cmds.py`, and diff it against
 `captures/vendor-0x21-dongle.bin`.
 
-**Offsets 13..22 are the DPI table**, as five 16-bit little-endian values:
+### General block, field by field
 
-| offset | bytes | stored | ×250 = DPI |
+Payload offsets are blob offsets minus 8; the packer registers index from 8.
+Confidence is marked per row.
+
+| blob | payload | meaning | confidence |
 |---|---|---|---|
-| 13 | `02 00` | 2 | 500 |
-| 15 | `04 00` | 4 | 1000 |
-| 17 | `08 00` | 8 | 2000 |
-| 19 | `0c 00` | 12 | 3000 |
-| 21 | `10 00` | 16 | 4000 |
+| `[0..7]` | — | HID header: report id `0x08`, echoed cmd, 6 zero bytes | confirmed |
+| `[8]` | `0x00` | `0x64` = 100, hard-coded constant | confirmed static |
+| `[9]` | `0x01` | **echoed, never written** (`0x13` on both reads) | confirmed static |
+| `[10]` | `0x02` bits 0–3 | report rate: 1=125, 2=250, 3=500, 4=1000 Hz | confirmed static |
+| `[10]` | `0x02` bit 7 | second (Y) DPI axis present | confirmed static |
+| `[11]` | `0x03` low nibble | number of enabled DPI levels | confirmed static |
+| `[11]` | `0x03` high nibble | active level, 1-based among enabled levels | confirmed static |
+| `[12]` | `0x04` | echoed, never written (`0x00`) | confirmed static |
+| `[13..]` | `0x05..` | X DPI table: one u16 per enabled level, `ladder index + 1` | confirmed static |
+| `[29..]` | `0x15..` | Y DPI table: same encoding, only when bit 7 above is set | confirmed static |
+| `[0x2d..]` | `0x25..` | one RGB triple per enabled level | confirmed static |
+| `[0x45]` | `0x3d` | active LED mode (derived from the stored index) | strong static |
+| `[0x46..0x8d]` | `0x3e..` | LED mode table, `LedOpt1..10` | confirmed static |
+| `[0x8e..0x97]` | `0x86..` | logo LED options + colour, **echoed, never written** | observed |
+| `[0x98]` | `0x90` | `0xa5`, hard-coded constant | confirmed static |
+| `[0x99]` | `0x91` | echoed `0x00` | confirmed static |
+| `[0x9a..0x207]` | — | not carried by the general-block command | confirmed static |
 
-Five levels, matching `DM=5`. The stored values are indices into the
-`DPISET` ladder in `Cfg.ini`, which runs `250,500,750,…` in 250 steps — so
-index *n* means *n*×250 DPI, giving exactly `DPI=500,1000,2000,3000,4000`
-from the same file.
+Both tables are **packed, not slotted**: a disabled level consumes no bytes,
+so a level with flag `0` shifts everything after it. Five enabled levels put
+`[13..0x1c]` in use and leave the rest of the X table zero, which is exactly
+what the capture shows.
 
-> **Corrected.** This table previously started at offset **12** and read
+**Offsets 13 onward are the X DPI table**, as 16-bit little-endian values:
+
+| offset | bytes | stored | `DPISET` index | DPI |
+|---|---|---|---|---|
+| 13 | `02 00` | 2 | 1 | 500 |
+| 15 | `04 00` | 4 | 3 | 1000 |
+| 17 | `08 00` | 8 | 7 | 2000 |
+| 19 | `0c 00` | 12 | 11 | 3000 |
+| 21 | `10 00` | 16 | 15 | 4000 |
+
+Five levels, matching `DM=5`. The stored value is **one more than the
+0-based index into the `DPISET` ladder** in `Cfg.ini`,
+`250,500,750,1000,1200,1500,1750,2000,2250,2400,2750,3000,…`. That ladder is
+*not* uniform: it runs in 250 steps to 2000, then 500 steps. `index + 1`
+reproduces all five captured values; `DPI / 250` agrees only below 2250 and
+is the wrong rule in general. `tools/decode_general_block.py` uses the
+ladder.
+
+> **Corrected (twice).** This table first started at offset **12** and read
 > `00 02` = **512**, `1024`, `2048`, `3072`, `4096`, on the theory that "the
-> device rounds each level up to the next multiple of 512". Both the offset
-> and the units were wrong, and the rounding story was a rationalisation of
-> the error: 512 is 2×256, not a DPI value. Reading one byte early makes each
-> 16-bit value 256× too large. See #6 — the packer writes the low byte first
-> from a cursor at offset `0x0d`.
+> device rounds each level up to the next multiple of 512". Reading one byte
+> early makes each 16-bit value 256× too large. The offset was then fixed but
+> the units were still described as *n*×250 DPI, which is wrong above 2000.
+> The packer writes the low byte first from a cursor at `0x0d`, and the
+> ladder lookup is at `0x40e5e0`.
 
-**`0xa5` is at offset `0x98`**, and it is a hard-coded constant — the last
-byte of the 146-byte general block, written by `movb $0xa5,0x90(%esi)` at
-`0x40ba2f`. It is **not** related to the `SetMatrix` terminator.
+**`0xa5` is at offset `0x98`**, a hard-coded constant written by
+`movb $0xa5,0x90(%esi)` at `0x40ba2f`. It is **not** related to the
+`SetMatrix` terminator.
 
 > **Corrected.** This section previously placed `0xa5` at `0x97` and argued
 > for it from `0x97 - 0x50 = 0x47`, a "constant `0x40` shift" mirroring the
@@ -582,17 +787,33 @@ byte of the 146-byte general block, written by `movb $0xa5,0x90(%esi)` at
 > *different* capture, one of which was a byte-for-byte duplicate of the real
 > row at `0x0060`. The blob contains exactly one `0xa5`, at `0x98`.
 
-`PROTOCOL.md` carried both errors and has been corrected.
+> **Corrected again.** `0xa5` was then described as the *last* byte of the
+> 146-byte general block. It is the **second to last**: the block is
+> `payload[0..0x91]`, `0xa5` is at `payload[0x90]`, and `payload[0x91]`
+> (blob `[0x99]`) is an echoed `0x00`. So the block ends with the 16-bit
+> value `0x00a5`, whose low byte is the constant and whose high byte is
+> whatever the device returned.
 
-The region from `0x45` to `0x95` is dense with `0xff`, matching keys set
-to *Disable* (`tc_key_off`), and carries repeated `0x42` bytes that look
-like per-key function tags.
+`PROTOCOL.md` carried the earlier errors and has been corrected.
+
+> **Corrected.** The region `[0x45..0x95]` was previously described as
+> "dense with `0xff`, matching keys set to *Disable*", with the repeated
+> `0x42` bytes read as "per-key function tags". That was wrong. It holds no
+> keys at all: it is the ten-entry LED mode table from `LedOpt1..LedOpt10`,
+> where `0x42` is a packed `Light`/`Speed` byte and the `0xff` runs are RGB
+> components. The key matrix lives in a different command (`0x12/0x22/0x32`)
+> and a different packet.
 
 Byte `[8] = 0x64` = 100 is **explained** (#6): it is the first byte of the
 general block, written as a hard-coded constant by `movb $0x64,(%esi)` at
 `0x40b75d`. It is stable across the `0x11` and `0x21` reads on two different
 USB products because it is a constant, not device state — so it is not a
 candidate for anything and will never move.
+
+The decode is executable: `python3 tools/decode_general_block.py BLOB`
+prints every field above for a captured 520-byte reply, and
+`tests/test_decode_general_block.py` pins the offsets against this exact
+capture.
 
 ## Still unknown
 
@@ -608,11 +829,20 @@ Stated plainly, because these matter for anyone considering writes.
    restore?"), but its protocol command was **not** traced. Whether a
    defaults-restore exists on the wire is unknown. Do not assume an escape
    hatch until this is confirmed.
-3. The field layout of the 520-byte config blob. Partly resolved (#6): the
-   general block at `[8..0x99]` is now mapped. The remaining un-decoded span
-   is `[0x99..0x207]` — and on the dongle that span is **entirely zero**, so
-   it cannot be mapped from a dongle capture at all. A wired-mouse capture is
-   needed.
+3. The field layout of the 520-byte config blob. The **general block is now
+   mapped end to end**: `[8..0x99]`, 146 bytes, every offset accounted for
+   including the two that were misread before (`[10]` is the report rate, not
+   an echoed byte; `[0x1d..0x2c]` is the Y-axis DPI table, not "zero, unknown").
+   Nothing in `[0x9a..0x207]` is carried by the general-block command, and on
+   the dongle that whole span is zero, so it cannot be mapped from a dongle
+   capture. It belongs to the other three write commands (PSD, macro, matrix),
+   which are still only partly traced.
+
+   Two bytes in the mapped block are **not fields at all**: `[9]` and `[12]`
+   are echoed from the device because neither packer writes them, and
+   `[0x8e..0x97]` (logo LED) is echoed for the same reason. `[9]` stays
+   `0x13` across products because it is constant device data, not because it
+   means anything to the app.
 
    The button-differential route is **closed** (#3). This model has no
    profile button, and DPI+/DPI−, the light-mode toggle and the report-rate
@@ -621,7 +851,7 @@ Stated plainly, because these matter for anyone considering writes.
    host was `BTN_LEFT`; meanwhile the `0x21` blob did not move a single byte,
    and is byte-identical to the 2026-10-17 capture. The active DPI level,
    lighting mode and report rate are **not** persisted into this blob: the
-   DPI table at offset 13 is the five configured levels, not the selected one.
+   DPI table is the configured levels, not the selected one.
 4. Why the dongle answers `0x21` but stalls `0x11` / `0x31`, while the
    wired mouse answered `0x11`. Needs a wired-vs-dongle comparison. The
    "cycle the profile with the mouse's own button" test is not possible — this

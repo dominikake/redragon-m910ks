@@ -114,17 +114,22 @@ dead here. The command set must be discovered empirically, not copied.
 First bytes observed: `08 11 00 00 00 00 00 00 64 13 01 15 00 02 00 04 ...`
 
 - `[0]` report id `0x08`, `[1]` echoed command
-- `[8]` = `0x64` = 100 -- **sensor field, and a prime battery candidate**
-  (libratbag puts the sensor id at byte 8; `0x64` is not a known PMW id, so
-  on this device that offset may mean something else)
-- `[9]` = `0x13` -> report_rate nibble `3` = 500 Hz, flags nibble `1`
-- `[10]` = `0x01` -> dpi_count nibble / active_dpi nibble
+- `[8]` = `0x64` = 100 -- **explained, and not battery-related** (#6): a
+  hard-coded constant, the first byte of the general block
+  (`movb $0x64,(%esi)` at `0x40b75d`). It cannot move, so it is not a
+  candidate for anything.
+- `[9]` = `0x13` -- **echoed from the device**, never written by either
+  packer. It is not a report-rate nibble.
+- `[10]` low nibble = report rate (`0x01` = 125 Hz here); bit 7 = second DPI
+  axis present
+- `[11]` low nibble = enabled DPI levels, high nibble = active level
+  (`0x15` = 5 levels, first active)
+- `[12]` = echoed, never written
 
-Byte 8 being exactly `100` is suggestive but almost certainly the sensor or a
-config default -- the mouse is not necessarily at 100%. **This needs a
-differential test**: read the blob, change state (charge the mouse, let it
-drain, toggle wireless), read again, and diff. The byte that moves is the
-battery.
+The battery is **not** in this blob. It is `cmd 0x90` reply byte 3 on the
+dongle, confirmed live — see `## Battery` above. Do not spend another
+differential on this blob looking for it; the physical-button route was
+tried and the blob never moves (#3).
 
 ### Commands from libratbag, NOT confirmed here
 
@@ -300,32 +305,48 @@ trigger this -- only the absence of a live reading over time does.
 
 ## Config blob (cmd `0x11`, report id `0x08`, 520 bytes)
 
-Bytes `0x00`..`0x9f` carry data; `0xa0`..`0x207` are all zero, so the real
-struct is ~160 bytes:
+The reply is an 8-byte header (`[0]` report id `0x08`, `[1]` echoed command,
+`[2..7]` zero) followed by the **146-byte general block at `[8..0x99]`**.
+That is the exact body `0x11`/`0x21`/`0x31` writes back: `SetGeneral`
+(`0x40a4d0`) copies `0x92` bytes from the buffer and sends them. Everything
+from `[0x9a]` up is zero on both captures and is not carried by this
+command.
 
 ```
 0000  08 11 00 00 00 00 00 00 64 13 01 15 00 02 00 04
 0010  00 08 00 0c 00 10 00 00 ...
 ...
 0090  00 00 00 01 02 ff 00 00 a5 ...
-00a0  00 00 ... (all zero to 0x207)
+009a  00 00 ... (all zero to 0x207)
 ```
 
 > These offsets are from the earlier **wired `258a:002e` `0x11` read**. The
-> dongle `0x21` capture in `captures/` differs at `[9]`–`[11]`; see #7.
+> dongle `0x21` capture in `captures/` differs at `[10]`/`[11]` (rate code
+> and level nibbles) but `[9]` is `0x13` in both; see #7.
 
-- `[0]` report id `0x08`, `[1]` echoed command `0x11`
-- `[8]` = `0x64` = 100 -- **now explained** (#6): it is the first byte of the
-  general block, a hard-coded constant (`movb $0x64,(%esi)` at `0x40b75d`).
-  Not a sensor id and not battery-related; it is a constant, so it will never
-  move.
-- `[9]` = `0x13` -> report_rate nibble `3` = 500 Hz, flags nibble `1`
-- `[10]` = `0x01` -> dpi_count / active_dpi nibbles
-- `[11]` = `0x15` -> bitmask, plausibly disabled DPI slots
-- The lone `a5` is at offset `0x98`, not `0x97` -- and it is a hard-coded
-  constant at the end of the general block, **not** the key-matrix terminator
-  nested inside the blob. That was an inference, never observed on the wire,
-  and it was wrong (#6).
+| offset | meaning |
+|---|---|
+| `[8]` | `0x64`, hard-coded constant (`0x40b75d`) |
+| `[9]` | **echoed** from the device; never written (`0x13`) |
+| `[10]` bits 0–3 | report rate: 1=125, 2=250, 3=500, 4=1000 Hz |
+| `[10]` bit 7 | second (Y) DPI axis present |
+| `[11]` low/high nibble | enabled level count / active level |
+| `[12]` | echoed, never written |
+| `[13..]` | X DPI table, one u16 per enabled level, `DPISET index + 1` |
+| `[29..]` | Y DPI table, same encoding, only if bit 7 of `[10]` is set |
+| `[0x2d..]` | one RGB triple per enabled level |
+| `[0x45]` | active LED mode |
+| `[0x46..0x8d]` | `LedOpt1..10` mode table |
+| `[0x8e..0x97]` | logo LED options + colour, **echoed** |
+| `[0x98]` | `0xa5`, hard-coded constant (`0x40ba2f`) |
+| `[0x99]` | echoed `0x00`; the block ends with the 16-bit value `0x00a5` |
+
+Both DPI tables are **packed**: a disabled level consumes no bytes. The
+stored value is the 1-based index into `Cfg.ini`'s `DPISET` ladder, not a DPI
+count — see `GUI-ANALYSIS.md` for the table and the disassembly.
+
+`tools/decode_general_block.py` decodes every field above from a captured
+reply.
 
 ## What is NOT known
 
@@ -344,11 +365,18 @@ Still open:
 2. **Whether a defaults-restore exists on the wire.** The GUI has a
    `Restore` / `Reset` button (`tc_restore`, `tc_reset`, `tc_msg5`), but the
    command behind it was not traced. Do not assume an escape hatch.
-3. **The 520-byte blob field layout**, beyond the nested key-matrix region.
-   Partly resolved (#6): the general block at `[8..0x99]` is mapped. The
-   remaining un-decoded span is `[0x99..0x207]`.
-   Byte `[8] = 0x64` is **explained** — a hard-coded constant at the start
-   of the general block.
+3. **The 520-byte blob field layout.** The general block is **mapped end to
+   end** (#6): `[8..0x99]`, 146 bytes, every offset accounted for. Nothing in
+   `[0x9a..0x207]` is carried by this command — `SetGeneral` memcpys exactly
+   `0x92` bytes — and the span is zero on every capture, so it is not part of
+   the `0x11`/`0x21`/`0x31` reply at all. It belongs to the PSD, macro and key
+   matrix commands (`0x12`/`0x22`/`0x32` and friends), which are still only
+   partly traced.
+   Three bytes in the mapped block are **not fields**: `[9]`, `[12]` and
+   `[0x8e..0x97]` are echoed from the device because neither packer writes
+   them. `[8] = 0x64` is a hard-coded constant at the start of the block, and
+   `[0x98] = 0xa5` is a hard-coded constant near its end that has nothing to
+   do with the key-matrix terminator.
 4. Meaning of the special FunIDs `0x5b` / `0x5c` and the `0xf0`-`0xfa`
    group (probably the dedicated DPI / RGB / profile / fire buttons).
 
