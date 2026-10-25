@@ -252,10 +252,12 @@ The identity `0x07 + 0x50 = 0x57` is what makes byte 2 read as a length
 rather than a constant — the `0xa5` lands exactly one past an 80-byte
 payload. Flagged as **strong inference**, not observation.
 
-**This is the most likely origin of the lone `0xa5` at offset `0x97` of the
-520-byte config blob recorded in `PROTOCOL.md`** — `0x07 + 0x50 = 0x57`
-within the 80-byte matrix, nested inside the larger blob. Consistent, but
-not proven without a captured write.
+**Not** the origin of the `0xa5` in the 520-byte config blob. An earlier
+version of this file proposed the matrix terminator as its origin, on the
+strength of `0x97 - 0x50 = 0x47`. That was inference, never observed, and it
+is wrong: the blob's only `0xa5` is at offset `0x98`, where the
+general-block packer writes a hard-coded constant (#6). The two `0xa5` bytes
+are unrelated.
 
 ### `SetMacro` packet
 
@@ -334,17 +336,55 @@ lands on K9, matching the physical layout). Byte 1 carries the function
 code; the `0xA8`/`0xA9`/`0xAC`/`0xAE` group on K6/K7/K8/K10 are the
 programmable macro buttons.
 
-The matrix builder at `0x40b010` dispatches on **byte 0**, biased by
-`0x10`, through a case table at `0x40b284` and a 16-entry jump table at
-`0x40b244`.
+The matrix builder at `0x40b010` dispatches on **byte 0** of each record,
+in **two stages**. The whole dispatch is six instructions:
 
-> **Corrected.** An earlier version of this section had the encoded column
-> off by one and omitted case 0 entirely. The table below is the verified
-> one, regenerable with `tools/re_pe.py`; the error came from pairing each
-> case index with the previous case's encoded byte.
+```
+  40b072:  8a 0e                 mov    (%esi),%cl        ; cl = byte 0 = the FunID
+  40b088:  0f b6 d1              movzbl %cl,%edx
+  40b08b:  83 c2 f0              add    $0xfffffff0,%edx   ; edx = FunID - 0x10
+  40b093:  81 fa ea 00 00 00     cmp    $0xea,%edx
+  40b099:  0f 87 b8 00 00 00     ja     0x40b157           ; out of range -> default
+  40b09f:  0f b6 92 84 b2 40 00  movzbl 0x40b284(%edx),%edx ; stage 1: FunID -> case
+  40b0a6:  ff 24 95 44 b2 40 00  jmp    *0x40b244(,%edx,4)   ; stage 2: case -> handler
+```
 
-The bounds check is `cmp $0xea`, so only FunIDs `0x10..0xFA` are reachable.
-The ten table entries past that hold out-of-range values and are dead data.
+Stage 1 indexes a **235-byte table** at `0x40b284`; stage 2 indexes a
+**16-entry dword** jump table at `0x40b244`. Both counts are real, and they
+count different things — that was the contradiction an earlier revision of
+this section papered over with "16 reachable entries, not 235".
+
+| | address | extent | holds |
+|---|---|---|---|
+| stage 1, byte table | `0x40b284` | `235` bytes (`0x40b284`–`0x40b36e`) | case index `0x00`–`0x0f` |
+| stage 2, jump table | `0x40b244` | `64` bytes = `16` entries | handler VA |
+
+The bound is self-consistent at both levels, which is the point of splitting
+it in two:
+
+- `cmp $0xea` / `ja` is **unsigned**, so `edx` is constrained to `0..0xea` —
+  235 values — which is exactly the byte table's length. FunIDs below `0x10`
+  wrap on the `add` and also take the `ja`.
+- Every value in the byte table is `<= 0x0f`, so it can never index past the
+  16-entry jump table. **No second clamp is needed**, and none exists.
+- `ja 0x40b157` and `jump[15]` are *the same address*, so an out-of-range
+  FunID and the default case converge on one handler rather than needing a
+  separate path.
+
+Immediately past the byte table there is **one** byte, an `int3` at
+`0x40b36f`; `0x40b370` is already the next function's SEH prolog
+(`push $0xffffffff; push $0x56c08b; mov %fs:0x0,%eax`). There are no
+trailing table entries of any kind.
+
+> **Corrected twice.** The first version had the encoded column off by one
+> and omitted case 0. The second fixed that but then asserted "16 reachable
+> entries, not 235" alongside a `cmp $0xea` that makes 235 reachable, and
+> claimed ten dead entries past `0xFA` where there is one `int3`.
+>
+> Reproducing this section takes more than one tool: `re_pe.py --data` dumps
+> the two tables' bytes, and `re_fn.py` on a disassembly restarted at each
+> handler address gives its behaviour. `re_pe.py` alone yields the tables but
+> not the handlers.
 
 | case | FunIDs | size (`bl`) | encoded | meaning |
 |---|---|---|---|---|
@@ -357,13 +397,28 @@ The ten table entries past that hold out-of-range values and are dead data.
 | 6 | `0xf2` | 1 | `0x04` | |
 | 7 | `0xf3` | 1 | `0x08` | |
 | 8 | `0xf4` | 1 | `0x10` | |
-| 9 | `0xf5` | 4 | *increments* | |
-| 10 | `0xf6` | 4 | *increments* | |
-| 11 | `0xf7` | 3 | *increments* | |
-| 12 | `0xf8` | 3 | *zeroes* | |
-| 13 | `0xf9` | 2 | *increments* | |
-| 14 | `0xfa` | 2 | *zeroes* | |
-| 15 | `0x13`–`0xef` (213) | 5 | default | keyboard / media / combo |
+| 9 | `0xf5` | 4 | byte 1 as-is | |
+| 10 | `0xf6` | 4 | byte 1 negated | |
+| 11 | `0xf7` | 3 | byte 1 negated | |
+| 12 | `0xf8` | 3 | byte 1 as-is | |
+| 13 | `0xf9` | 2 | byte 1 negated | |
+| 14 | `0xfa` | 2 | byte 1 as-is | |
+| 15 | default (213) | 5 | default | keyboard / media / combo |
+
+The case-to-FunID mapping and every `size (bl)` above is read straight out of
+the two tables. Two details are worth being precise about:
+
+- **The default case is not the contiguous range `0x13`–`0xef`.** It is 213
+  FunIDs in three runs — `0x13`–`0x5a`, `0x5d`–`0x9f`, `0xa6`–`0xef` — because
+  `0x5b`, `0x5c` and `0xa0`–`0xa5` are carved out. That is the `221` FunIDs
+  of `0x13`–`0xef` minus the `8` special-cased ones.
+- **Cases 9–14 differ by more than a label.** All six clear `0x13(%esp)`,
+  which sends them down the table-lookup path at `0x40b175` instead of
+  writing a literal. Three of them (cases 10, 11, 13) additionally run
+  `not %al; inc %al` on byte 1 first, i.e. they negate it before the lookup.
+  Case 9 does **not** — an earlier revision of this table labelled it
+  "*increments*" and paired it with case 10, which is backwards; cases 9, 12
+  and 14 are the same plain variant.
 
 Two shapes fall out of this that were not visible before:
 
@@ -372,8 +427,8 @@ Two shapes fall out of this that were not visible before:
   candidate for the dedicated hardware buttons.
 - **`0xf5`–`0xfa` pair up**: `(0xf5, 0xf6)` both size 4, `(0xf7, 0xf8)` both
   size 3, `(0xf9, 0xfa)` both size 2, and within each pair one handler
-  *increments* the counter while the other *zeroes* it. That is the shape of
-  a pair of related settings, e.g. two sides of one function.
+  negates byte 1 while the other passes it through unchanged. That is the
+  shape of a pair of related settings, e.g. two sides of one function.
 
 Neither interpretation is confirmed. `text.xml` names DPI, RGB, profile
 switch and fire key as distinct hardware actions, so five flags fits — but
@@ -458,47 +513,62 @@ is consistent with the latter — but it is **not established**.
 0030  00 00 ff 00 ff 00 ff 00 ff ff ff 00 00 ff ff ff   |................|
 0040  ff ff ff 46 00 01 42 01 40 ff 00 00 42 07 ff 00   |...F..B.@...B...|
 0050  00 00 ff 00 00 00 ff ff 00 ff ff ff 00 ff 80 00   |................|
-...
-0090  00 ff ff 02 42 40 ff 00 00 00 ff 00 00 00 ff ff   |....B..........|
-00a0  00 ff ff ff 00 ff ff ff 00 00 00 00 00 00 00 00   |................|
-00b0  00 00 00 00 42 ff 00 00 00 ff 00 42 42 02 ff 00   |....B......BB...|
-00c0  00 00 00 00 01 02 ff 00 00 a5 00 00 00 00 00 00   |................|
+0060  00 ff ff 02 42 40 ff 00 00 00 ff 00 00 00 ff ff   |....B@..........|
+0070  00 ff ff ff 00 ff ff 00 00 00 00 00 00 00 00 00   |................|
+0080  00 00 00 00 42 ff 00 00 00 ff 00 42 42 02 ff 00   |....B......BB...|
+0090  00 00 00 01 02 ff 00 00 a5 00 00 00 00 00 00 00   |................|
 ```
 
-Raw copy kept out of git; re-read it any time with
-`python3 tools/verify_vendor_cmds.py`.
+Offsets `0x000`–`0x09f` shown contiguously; the blob is 520 bytes and the
+rest is not yet mapped. Raw copy kept out of git; re-read it any time with
+`python3 tools/verify_vendor_cmds.py`, and diff it against
+`captures/vendor-0x21-dongle.bin`.
 
-**Offsets 12..21 are the DPI table.** Read as five 16-bit little-endian
-values:
+**Offsets 13..22 are the DPI table**, as five 16-bit little-endian values:
 
-| offset | bytes | value |
-|---|---|---|
-| 12 | `00 02` | 512 |
-| 14 | `00 04` | 1024 |
-| 16 | `00 08` | 2048 |
-| 18 | `00 0c` | 3072 |
-| 20 | `00 10` | 4096 |
+| offset | bytes | stored | ×250 = DPI |
+|---|---|---|---|
+| 13 | `02 00` | 2 | 500 |
+| 15 | `04 00` | 4 | 1000 |
+| 17 | `08 00` | 8 | 2000 |
+| 19 | `0c 00` | 12 | 3000 |
+| 21 | `10 00` | 16 | 4000 |
 
-Five levels, matching `DM=5` and `DPI=500,1000,2000,3000,4000` in
-`Cfg.ini`. The device rounds each level up to the next multiple of 512, so
-the stored values are the quantised form of the nominal DPI. **This is a
-new finding** — no prior document in this repo had identified the DPI
-table's location.
+Five levels, matching `DM=5`. The stored values are indices into the
+`DPISET` ladder in `Cfg.ini`, which runs `250,500,750,…` in 250 steps — so
+index *n* means *n*×250 DPI, giving exactly `DPI=500,1000,2000,3000,4000`
+from the same file.
 
-**`0xa5` lands at offset `0x97`,** exactly where `PROTOCOL.md` recorded it
-in an earlier session and exactly where the `SetMatrix` analysis predicted
-a terminator would be. The predicted write-packet arithmetic
-(`payload at 0x07`, `length 0x50`, `terminator at 0x07 + 0x50 = 0x57`) is
-mirrored here by `0x97 - 0x50 = 0x47`, a constant `0x40` shift — consistent
-with the matrix being nested at a fixed offset inside the larger blob.
+> **Corrected.** This table previously started at offset **12** and read
+> `00 02` = **512**, `1024`, `2048`, `3072`, `4096`, on the theory that "the
+> device rounds each level up to the next multiple of 512". Both the offset
+> and the units were wrong, and the rounding story was a rationalisation of
+> the error: 512 is 2×256, not a DPI value. Reading one byte early makes each
+> 16-bit value 256× too large. See #6 — the packer writes the low byte first
+> from a cursor at offset `0x0d`.
 
-The region from `0x45` to `0x97` is dense with `0xff`, matching keys set
+**`0xa5` is at offset `0x98`**, and it is a hard-coded constant — the last
+byte of the 146-byte general block, written by `movb $0xa5,0x90(%esi)` at
+`0x40ba2f`. It is **not** related to the `SetMatrix` terminator.
+
+> **Corrected.** This section previously placed `0xa5` at `0x97` and argued
+> for it from `0x97 - 0x50 = 0x47`, a "constant `0x40` shift" mirroring the
+> matrix arithmetic. That inference was wrong, and its stated evidence was
+> not real: the hexdump above previously ended with four rows copied from a
+> *different* capture, one of which was a byte-for-byte duplicate of the real
+> row at `0x0060`. The blob contains exactly one `0xa5`, at `0x98`.
+
+`PROTOCOL.md` carried both errors and has been corrected.
+
+The region from `0x45` to `0x95` is dense with `0xff`, matching keys set
 to *Disable* (`tc_key_off`), and carries repeated `0x42` bytes that look
 like per-key function tags.
 
-Byte `[8] = 0x64` = 100 remains unexplained — it is stable across the
-`0x11` read recorded earlier and this `0x21` read, on two different USB
-products.
+Byte `[8] = 0x64` = 100 is **explained** (#6): it is the first byte of the
+general block, written as a hard-coded constant by `movb $0x64,(%esi)` at
+`0x40b75d`. It is stable across the `0x11` and `0x21` reads on two different
+USB products because it is a constant, not device state — so it is not a
+candidate for anything and will never move.
 
 ## Still unknown
 
@@ -514,16 +584,13 @@ Stated plainly, because these matter for anyone considering writes.
    restore?"), but its protocol command was **not** traced. Whether a
    defaults-restore exists on the wire is unknown. Do not assume an escape
    hatch until this is confirmed.
-3. The exact field layout of the 520-byte config blob beyond the matrix
-   region. The general block is built by routines at `0x40b750` / `0x40b9f0`
-   that were not fully decoded.
+3. The field layout of the 520-byte config blob. Partly resolved (#6): the
+   general block at `[8..0x99]` is now mapped. The remaining un-decoded span
+   is `[0x99..0x207]`.
 4. Why the dongle answers `0x21` but stalls `0x11` / `0x31`, while the
    wired mouse answered `0x11`. Needs a wired-vs-dongle comparison.
 5. The meaning of the special FunIDs `0x5b`/`0x5c` and the `0xf0`–`0xfa`
    group.
-6. Whether byte 8 of the config blob (`0x64` = 100) is the sensor id, a
-   default, or something else — still unresolved, and stable across reads
-   on two different USB products.
 
 ## Risk notes
 
