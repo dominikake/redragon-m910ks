@@ -113,18 +113,18 @@ dead here. The command set must be discovered empirically, not copied.
 
 First bytes observed: `08 11 00 00 00 00 00 00 64 13 01 15 00 02 00 04 ...`
 
-- `[0]` report id `0x08`, `[1]` echoed command
-- `[8]` = `0x64` = 100 -- **explained, and not battery-related** (#6): a
+- `[0x00]` report id `0x08`, `[0x01]` echoed command
+- `[0x08]` = `0x64` = 100 -- **explained, and not battery-related** (#6): a
   hard-coded constant, the first byte of the general block
   (`movb $0x64,(%esi)` at `0x40b75d`). It cannot move, so it is not a
   candidate for anything.
-- `[9]` = `0x13` -- **echoed from the device**, never written by either
+- `[0x09]` = `0x13` -- **echoed from the device**, never written by either
   packer. It is not a report-rate nibble.
-- `[10]` low nibble = report rate (`0x01` = 125 Hz here); bit 7 = second DPI
-  axis present
-- `[11]` low nibble = enabled DPI levels, high nibble = active level
+- `[0x0a]` low nibble = report rate (`0x01` = 125 Hz here); bit 7 = second
+  DPI axis present
+- `[0x0b]` low nibble = enabled DPI levels, high nibble = active level
   (`0x15` = 5 levels, first active)
-- `[12]` = echoed, never written
+- `[0x0c]` = echoed, never written
 
 The battery is **not** in this blob. It is `cmd 0x90` reply byte 3 on the
 dongle, confirmed live — see `## Battery` above. Do not spend another
@@ -305,12 +305,12 @@ trigger this -- only the absence of a live reading over time does.
 
 ## Config blob (cmd `0x11`, report id `0x08`, 520 bytes)
 
-The reply is an 8-byte header (`[0]` report id `0x08`, `[1]` echoed command,
-`[2..7]` zero) followed by the **146-byte general block at `[8..0x99]`**.
-That is the exact body `0x11`/`0x21`/`0x31` writes back: `SetGeneral`
-(`0x40a4d0`) copies `0x92` bytes from the buffer and sends them. Everything
-from `[0x9a]` up is zero on both captures and is not carried by this
-command.
+The reply is an 8-byte header (`[0x00]` report id `0x08`, `[0x01]` echoed
+command, `[0x02..0x07]` zero) followed by the **146-byte general block at
+`[0x08..0x99]`**. That is the exact body `0x11`/`0x21`/`0x31` writes back:
+`SetGeneral` (`0x40a4d0`) copies `0x92` bytes from the buffer and sends them.
+Everything from `[0x9a]` up is zero on both captures and is not carried by
+this command. Every offset below is hex.
 
 ```
 0000  08 11 00 00 00 00 00 00 64 13 01 15 00 02 00 04
@@ -321,19 +321,19 @@ command.
 ```
 
 > These offsets are from the earlier **wired `258a:002e` `0x11` read**. The
-> dongle `0x21` capture in `captures/` differs at `[10]`/`[11]` (rate code
-> and level nibbles) but `[9]` is `0x13` in both; see #7.
+> dongle `0x21` capture in `captures/` differs at `[0x0a]`/`[0x0b]` (rate
+> code and level nibbles) but `[0x09]` is `0x13` in both; see #7.
 
 | offset | meaning |
 |---|---|
-| `[8]` | `0x64`, hard-coded constant (`0x40b75d`) |
-| `[9]` | **echoed** from the device; never written (`0x13`) |
-| `[10]` bits 0–3 | report rate: 1=125, 2=250, 3=500, 4=1000 Hz |
-| `[10]` bit 7 | second (Y) DPI axis present |
-| `[11]` low/high nibble | enabled level count / active level |
-| `[12]` | echoed, never written |
-| `[13..]` | X DPI table, one u16 per enabled level, `DPISET index + 1` |
-| `[29..]` | Y DPI table, same encoding, only if bit 7 of `[10]` is set |
+| `[0x08]` | `0x64`, hard-coded constant (`0x40b75d`) |
+| `[0x09]` | **echoed** from the device; never written (`0x13`) |
+| `[0x0a]` bits 0–3 | report rate: 1=125, 2=250, 3=500, 4=1000 Hz |
+| `[0x0a]` bit 7 | second (Y) DPI axis present |
+| `[0x0b]` low/high nibble | enabled level count / active level |
+| `[0x0c]` | echoed, never written |
+| `[0x0d..]` | X DPI table, one u16 per enabled level, `DPISET index + 1` |
+| `[0x1d..0x2c]` | Y DPI table, same encoding, only if bit 7 of `[0x0a]` is set |
 | `[0x2d..]` | one RGB triple per enabled level |
 | `[0x45]` | active LED mode |
 | `[0x46..0x8d]` | `LedOpt1..10` mode table |
@@ -366,13 +366,13 @@ Still open:
    `Restore` / `Reset` button (`tc_restore`, `tc_reset`, `tc_msg5`), but the
    command behind it was not traced. Do not assume an escape hatch.
 3. **The 520-byte blob field layout.** The general block is **mapped end to
-   end** (#6): `[8..0x99]`, 146 bytes, every offset accounted for. Nothing in
+   end** (#6): `[0x08..0x99]`, 146 bytes, every offset accounted for. Nothing in
    `[0x9a..0x207]` is carried by this command — `SetGeneral` memcpys exactly
    `0x92` bytes — and the span is zero on every capture, so it is not part of
    the `0x11`/`0x21`/`0x31` reply at all. It belongs to the PSD, macro and key
    matrix commands (`0x12`/`0x22`/`0x32` and friends), which are still only
    partly traced.
-   Three bytes in the mapped block are **not fields**: `[9]`, `[12]` and
+   Three bytes in the mapped block are **not fields**: `[0x09]`, `[0x0c]` and
    `[0x8e..0x97]` are echoed from the device because neither packer writes
    them. `[8] = 0x64` is a hard-coded constant at the start of the block, and
    `[0x98] = 0xa5` is a hard-coded constant near its end that has nothing to

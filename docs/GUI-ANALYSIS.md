@@ -337,13 +337,13 @@ SetGeneral(profile, buf) 0x40a4d0   0x11/0x21/0x31, writes 0x92 bytes
 
 `SetGeneral` copies exactly **`0x92` = 146 bytes** out of the buffer
 (`push $0x92` at `0x40a52d`, then the `memcpy` at `0x40a53d`). So the
-general block is reply bytes **`[8..0x99]`**, and `esi` inside both packers
+general block is reply bytes **`[0x08..0x99]`**, and `esi` inside both packers
 is the block base, not the reply base. Two writes pin that down against the
 captured blob:
 
 | instruction | writes | blob offset | capture |
 |---|---|---|---|
-| `movb $0x64,(%esi)` at `0x40b75d` | `esi[0x00]` | `[8]` | `0x64` |
+| `movb $0x64,(%esi)` at `0x40b75d` | `esi[0x00]` | `[0x08]` | `0x64` |
 | `movb $0xa5,0x90(%esi)` at `0x40ba2f` | `esi[0x90]` | `[0x98]` | `0xa5` |
 
 Because the buffer came from `GetConfig`, **any byte neither packer writes
@@ -404,11 +404,11 @@ to 500 steps. `tools/decode_general_block.py` uses the ladder.
 **The two DPI tables are packed, not slotted.** The cursor only advances for
 levels whose flag is `0` (`add $0x2,%ebx` at `0x40b864` sits inside the
 enabled branch), so five enabled levels occupy ten bytes and the remaining
-slots stay zero. That is why `[13..0x1c]` looks like a fixed table on this
+slots stay zero. That is why `[0x0d..0x1c]` looks like a fixed table on this
 device and would not on a mouse with fewer levels enabled.
 
 `esi[0x15..0x24]` — blob `[0x1d..0x2c]` — is the **Y-axis DPI table**. It is
-zero here only because bit 7 of `[10]` is clear: this sensor exposes a
+zero here only because bit 7 of `[0x0a]` is clear: this sensor exposes a
 single DPI axis. The bytes were previously listed as "zero, unknown"; they
 are a second packed table.
 
@@ -714,7 +714,7 @@ is consistent with the latter — but it is **not established**.
 ```
 
 Offsets `0x000`–`0x09f` shown contiguously; the blob is 520 bytes. The
-general block the packers own runs from `[8]` to `[0x99]`; everything from
+general block the packers own runs from `[0x08]` to `[0x99]`; everything from
 `[0x9a]` onward is zero in both captures and belongs to other commands (see
 below). Raw copy kept out of git; re-read it any time with
 `python3 tools/verify_vendor_cmds.py`, and diff it against
@@ -723,20 +723,20 @@ below). Raw copy kept out of git; re-read it any time with
 ### General block, field by field
 
 Payload offsets are blob offsets minus 8; the packer registers index from 8.
-Confidence is marked per row.
+Confidence is marked per row, and every offset here is hex.
 
 | blob | payload | meaning | confidence |
 |---|---|---|---|
-| `[0..7]` | — | HID header: report id `0x08`, echoed cmd, 6 zero bytes | confirmed |
-| `[8]` | `0x00` | `0x64` = 100, hard-coded constant | confirmed static |
-| `[9]` | `0x01` | **echoed, never written** (`0x13` on both reads) | confirmed static |
-| `[10]` | `0x02` bits 0–3 | report rate: 1=125, 2=250, 3=500, 4=1000 Hz | confirmed static |
-| `[10]` | `0x02` bit 7 | second (Y) DPI axis present | confirmed static |
-| `[11]` | `0x03` low nibble | number of enabled DPI levels | confirmed static |
-| `[11]` | `0x03` high nibble | active level, 1-based among enabled levels | confirmed static |
-| `[12]` | `0x04` | echoed, never written (`0x00`) | confirmed static |
-| `[13..]` | `0x05..` | X DPI table: one u16 per enabled level, `ladder index + 1` | confirmed static |
-| `[29..]` | `0x15..` | Y DPI table: same encoding, only when bit 7 above is set | confirmed static |
+| `[0x00..0x07]` | — | HID header: report id `0x08`, echoed cmd, 6 zero bytes | confirmed |
+| `[0x08]` | `0x00` | `0x64` = 100, hard-coded constant | confirmed static |
+| `[0x09]` | `0x01` | **echoed, never written** (`0x13` on both reads) | confirmed static |
+| `[0x0a]` | `0x02` bits 0–3 | report rate: 1=125, 2=250, 3=500, 4=1000 Hz | confirmed static |
+| `[0x0a]` | `0x02` bit 7 | second (Y) DPI axis present | confirmed static |
+| `[0x0b]` | `0x03` low nibble | number of enabled DPI levels | confirmed static |
+| `[0x0b]` | `0x03` high nibble | active level, 1-based among enabled levels | confirmed static |
+| `[0x0c]` | `0x04` | echoed, never written (`0x00`) | confirmed static |
+| `[0x0d..]` | `0x05..` | X DPI table: one u16 per enabled level, `ladder index + 1` | confirmed static |
+| `[0x1d..0x2c]` | `0x15..` | Y DPI table: same encoding, only when bit 7 above is set | confirmed static |
 | `[0x2d..]` | `0x25..` | one RGB triple per enabled level | confirmed static |
 | `[0x45]` | `0x3d` | active LED mode (derived from the stored index) | strong static |
 | `[0x46..0x8d]` | `0x3e..` | LED mode table, `LedOpt1..10` | confirmed static |
@@ -747,18 +747,18 @@ Confidence is marked per row.
 
 Both tables are **packed, not slotted**: a disabled level consumes no bytes,
 so a level with flag `0` shifts everything after it. Five enabled levels put
-`[13..0x1c]` in use and leave the rest of the X table zero, which is exactly
+`[0x0d..0x1c]` in use and leave the rest of the X table zero, which is exactly
 what the capture shows.
 
-**Offsets 13 onward are the X DPI table**, as 16-bit little-endian values:
+**Offsets `0x0d` onward are the X DPI table**, as 16-bit little-endian values:
 
 | offset | bytes | stored | `DPISET` index | DPI |
 |---|---|---|---|---|
-| 13 | `02 00` | 2 | 1 | 500 |
-| 15 | `04 00` | 4 | 3 | 1000 |
-| 17 | `08 00` | 8 | 7 | 2000 |
-| 19 | `0c 00` | 12 | 11 | 3000 |
-| 21 | `10 00` | 16 | 15 | 4000 |
+| `0x0d` | `02 00` | 2 | 1 | 500 |
+| `0x0f` | `04 00` | 4 | 3 | 1000 |
+| `0x11` | `08 00` | 8 | 7 | 2000 |
+| `0x13` | `0c 00` | 12 | 11 | 3000 |
+| `0x15` | `10 00` | 16 | 15 | 4000 |
 
 Five levels, matching `DM=5`. The stored value is **one more than the
 0-based index into the `DPISET` ladder** in `Cfg.ini`,
@@ -830,17 +830,17 @@ Stated plainly, because these matter for anyone considering writes.
    defaults-restore exists on the wire is unknown. Do not assume an escape
    hatch until this is confirmed.
 3. The field layout of the 520-byte config blob. The **general block is now
-   mapped end to end**: `[8..0x99]`, 146 bytes, every offset accounted for
-   including the two that were misread before (`[10]` is the report rate, not
+   mapped end to end**: `[0x08..0x99]`, 146 bytes, every offset accounted for
+   including the two that were misread before (`[0x0a]` is the report rate, not
    an echoed byte; `[0x1d..0x2c]` is the Y-axis DPI table, not "zero, unknown").
    Nothing in `[0x9a..0x207]` is carried by the general-block command, and on
    the dongle that whole span is zero, so it cannot be mapped from a dongle
    capture. It belongs to the other three write commands (PSD, macro, matrix),
    which are still only partly traced.
 
-   Two bytes in the mapped block are **not fields at all**: `[9]` and `[12]`
+   Two bytes in the mapped block are **not fields at all**: `[0x09]` and `[0x0c]`
    are echoed from the device because neither packer writes them, and
-   `[0x8e..0x97]` (logo LED) is echoed for the same reason. `[9]` stays
+   `[0x8e..0x97]` (logo LED) is echoed for the same reason. `[0x09]` stays
    `0x13` across products because it is constant device data, not because it
    means anything to the app.
 
