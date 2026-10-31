@@ -582,21 +582,21 @@ trailing table entries of any kind.
 
 | case | FunIDs | size (`bl`) | encoded | meaning |
 |---|---|---|---|---|
-| 0 | `0x10`, `0xa0`, `0xa1` | 6 | `0x02` | |
-| 1 | `0x11`, `0xa2`, `0xa3` | 6 | `0x01` | left click |
-| 2 | `0x12`, `0xa4`, `0xa5` | 6 | `0x04` | |
-| 3 | `0x5b`, `0x5c` | 6 | `0x08` | |
-| 4 | `0xf0` | 1 | `0x01` | |
-| 5 | `0xf1` | 1 | `0x02` | |
-| 6 | `0xf2` | 1 | `0x04` | |
-| 7 | `0xf3` | 1 | `0x08` | |
-| 8 | `0xf4` | 1 | `0x10` | |
-| 9 | `0xf5` | 4 | byte 1 as-is | |
-| 10 | `0xf6` | 4 | byte 1 negated | |
-| 11 | `0xf7` | 3 | byte 1 negated | |
-| 12 | `0xf8` | 3 | byte 1 as-is | |
-| 13 | `0xf9` | 2 | byte 1 negated | |
-| 14 | `0xfa` | 2 | byte 1 as-is | |
+| 0 | `0x10`, `0xa0`, `0xa1` | 6 | `0x02` | right button |
+| 1 | `0x11`, `0xa2`, `0xa3` | 6 | `0x01` | left button |
+| 2 | `0x12`, `0xa4`, `0xa5` | 6 | `0x04` | middle button |
+| 3 | `0x5b`, `0x5c` | 6 | `0x08` | forward (mouse bit `0x08`) |
+| 4 | `0xf0` | 1 | `0x01` | left button |
+| 5 | `0xf1` | 1 | `0x02` | right button |
+| 6 | `0xf2` | 1 | `0x04` | middle button |
+| 7 | `0xf3` | 1 | `0x08` | forward (mouse bit `0x08`) |
+| 8 | `0xf4` | 1 | `0x10` | back (mouse bit `0x10`) |
+| 9 | `0xf5` | 4 | byte 1 as-is | scroll, size 4 |
+| 10 | `0xf6` | 4 | byte 1 negated | scroll, size 4 |
+| 11 | `0xf7` | 3 | byte 1 negated | key action, size 3 |
+| 12 | `0xf8` | 3 | byte 1 as-is | key action, size 3 |
+| 13 | `0xf9` | 2 | byte 1 negated | delay / step, size 2 |
+| 14 | `0xfa` | 2 | byte 1 as-is | delay / step, size 2 |
 | 15 | default (213) | 5 | default | keyboard / media / combo |
 
 The case-to-FunID mapping and every `size (bl)` above is read straight out of
@@ -628,7 +628,52 @@ Neither interpretation is confirmed. `text.xml` names DPI, RGB, profile
 switch and fire key as distinct hardware actions, so five flags fits — but
 naming them needs the button mapping from #3, not more disassembly.
 
-The 6-byte encodings and their field meanings remain open — that is #8.
+### #8 — FunID → action names, and the 6-byte encoding
+
+The context-menu handler at `0x43b9b8` resolves an assignable button FunID to
+the `tc_*` label the UI displays, through the byte table at `0x43bd74` (FunID −
+`0x11`, range-checked against `0x9f`) and the jump table at `0x43bcd8`. The
+resolved labels are:
+
+| FunID | action (`tc_*`) | handler | UI category |
+|---|---|---|---|
+| `0x11` | Left button (`tc_click`) | `0x43b9d4` | mouse |
+| `0x12` | Middle button (`tc_middle`) | `0x43b9e5` | mouse |
+| `0x13` | Right button (`tc_menu`) | `0x43b9f6` | mouse |
+| `0x14` | Forward (`tc_forward`) | `0x43ba07` | mouse |
+| `0x15` | Back (`tc_back`) | `0x43ba18` | mouse |
+| `0x16` | Double Click (`tc_dbclick`) | `0x43ba29` | mouse |
+| `0x17` | Three Click (`tc_three`) | `0x43bc4e` | mouse |
+| `0x18` | R-Double Click (`tc_rdbclick`) | `0x43ba3a` | mouse |
+| `0x21`–`0x28` | Media Player / Play-Pause / Stop / Prev / Next / Vol+ / Vol− / Mute | `0x43ba4b`–`0x43bac2` | media |
+| `0x30`–`0x39` | Web-media actions (Favorites, Calculator, Explorer, Search, Home, Email, Web Forward, Web Stop, Web Refresh, Web Favorites) | `0x43bb06`–`0x43bba8` | web |
+
+FunIDs `0x19`–`0x20` and `0x29`–`0x30` resolve to the default handler, i.e.
+they are not UI-labelled mouse/media actions and fall through to the generic
+keyboard/media/combo path. The hardware family `0xf0`–`0xfa` is named from the
+same label strings and the builder: `0xf0`–`0xf4` are the physical buttons
+(left/right/middle/forward/back, mouse bits `0x01`/`0x02`/`0x04`/`0x08`/`0x10`)
+and `0xf5`–`0xf9` are scroll-up, scroll-down and the key-down/key-up/delay
+macro events.
+
+**#8 therefore named the special cases.** `0x11`, `0xa2`, `0xa3` are *left
+button* and `0x12`, `0xa4`, `0xa5` are *middle button* in the builder's case
+1 and 2; `0x10`, `0xa0`, `0xa1` and `0xf1` are *right button*; `0xf3` is
+*forward* and `0xf4` is *back* per the physical-button family. The 6-byte encoding
+is the three-byte key-list record the builder emits — first byte
+`(size << 4) | nibble`, second byte the parameter (default `0x01`), third byte
+the resolved action — with `size` taken from the handler (`6` for the button
+cases, `1` for the hardware-button cases, `2`–`4` for the scroll/event cases
+that resolve through the lookup at `0x5a2040`).
+
+**#8 is therefore implemented**: every special-cased FunID the builder and
+the context menu between them had in common is now named, and the encoding
+the builder's handlers write is stated in one place instead of being
+re-derived from the two tables each time. The remaining unknowns are not
+about naming — they are about what the second and third bytes *mean* and
+which default-path FunIDs map to the Keyboard / Media / Combo panes, and
+those are write-side questions for #11 rather than mapping questions for
+#8.
 
 ## Feature inventory
 
