@@ -829,6 +829,14 @@ Stated plainly, because these matter for anyone considering writes.
    restore?"), but its protocol command was **not** traced. Whether a
    defaults-restore exists on the wire is unknown. Do not assume an escape
    hatch until this is confirmed.
+
+   **#9 reframed this.** With the recovered command space narrowed to ten
+   commands (`0x01`, `0x11`/`0x21`/`0x31`, `0x12`/`0x22`/`0x32`, `0x30`, `0x90`,
+   `0x92`) and no magic "reset to factory" opcode in it, the Restore button
+   most likely re-applies a defaults template through the ordinary write
+   commands rather than sending a reset opcode. The escape hatch, if it
+   exists, is therefore a **known-good blob on disk** (#11) — not a protocol
+   feature. See "Recovery" below.
 3. The field layout of the 520-byte config blob. The **general block is now
    mapped end to end**: `[0x08..0x99]`, 146 bytes, every offset accounted for
    including the two that were misread before (`[0x0a]` is the report rate, not
@@ -859,6 +867,21 @@ Stated plainly, because these matter for anyone considering writes.
    needs the gated write path.
 5. The meaning of the special FunIDs `0x5b`/`0x5c` and the `0xf0`–`0xfa`
    group.
+
+## Recovery
+
+**#9 tracks this; the answer is being established.**
+
+- **Escape hatch:** a known-good config blob captured from a healthy mouse,
+  re-applied through the ordinary write commands (`0x92` PSD, `0x11`/`0x21`/
+  `0x31` general block, `0x12`/`0x22`/`0x32` key matrix). No magic reset
+  opcode has been found in the ten-command space. Whether the GUI's Restore
+  button implements this template re-apply is the open tracing question.
+- **Harsh test:** can recovery be done by this user without Windows and
+  without vendor tooling? Requires the known-good blob (#11) plus a physical
+  recovery route (DFU via button hold during power-up, test pad).
+- **No purchase:** a spare/sibling mouse (`BY24G` family) remains the cheapest
+  risk reduction, but is a purchasing decision and is **out of scope** here.
 
 ## Risk notes
 
