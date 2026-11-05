@@ -648,12 +648,12 @@ resolved labels are:
 | `0x21`–`0x28` | Media Player / Play-Pause / Stop / Prev / Next / Vol+ / Vol− / Mute | `0x43ba4b`–`0x43bac2` | media |
 | `0x30`–`0x39` | Web-media actions (Favorites, Calculator, Explorer, Search, Home, Email, Web Forward, Web Stop, Web Refresh, Web Favorites) | `0x43bb06`–`0x43bba8` | web |
 
-FunIDs `0x19`–`0x20` and `0x29`–`0x30` resolve to the default handler, i.e.
+FunIDs `0x19`–`0x20` and `0x29`–`0x2f` resolve to the default handler, i.e.
 they are not UI-labelled mouse/media actions and fall through to the generic
 keyboard/media/combo path. The hardware family `0xf0`–`0xfa` is named from the
 same label strings and the builder: `0xf0`–`0xf4` are the physical buttons
 (left/right/middle/forward/back, mouse bits `0x01`/`0x02`/`0x04`/`0x08`/`0x10`)
-and `0xf5`–`0xf9` are scroll-up, scroll-down and the key-down/key-up/delay
+and `0xf5`–`0xfa` are scroll-up, scroll-down and the key-down/key-up/delay
 macro events.
 
 **#8 therefore named the special cases.** `0x11`, `0xa2`, `0xa3` are *left
