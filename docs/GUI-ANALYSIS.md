@@ -830,13 +830,10 @@ Stated plainly, because these matter for anyone considering writes.
    defaults-restore exists on the wire is unknown. Do not assume an escape
    hatch until this is confirmed.
 
-   **#9 reframed this.** With the recovered command space narrowed to ten
-   commands (`0x01`, `0x11`/`0x21`/`0x31`, `0x12`/`0x22`/`0x32`, `0x30`, `0x90`,
-   `0x92`) and no magic "reset to factory" opcode in it, the Restore button
-   most likely re-applies a defaults template through the ordinary write
-   commands rather than sending a reset opcode. The escape hatch, if it
-   exists, is therefore a **known-good blob on disk** (#11) — not a protocol
-   feature. See "Recovery" below.
+   **#9 reframed this.** See [Recovery](#recovery) below: no magic reset
+   opcode appears in the vendor app's command surface, so the candidate
+   escape hatch is a known-good blob on disk (#11), not a protocol feature.
+   The Restore tracing question itself is still open.
 3. The field layout of the 520-byte config blob. The **general block is now
    mapped end to end**: `[0x08..0x99]`, 146 bytes, every offset accounted for
    including the two that were misread before (`[0x0a]` is the report rate, not
@@ -870,18 +867,27 @@ Stated plainly, because these matter for anyone considering writes.
 
 ## Recovery
 
-**#9 tracks this; the answer is being established.**
+**#9 tracks this; the recovery path is not established yet.**
 
-- **Escape hatch:** a known-good config blob captured from a healthy mouse,
-  re-applied through the ordinary write commands (`0x92` PSD, `0x11`/`0x21`/
-  `0x31` general block, `0x12`/`0x22`/`0x32` key matrix). No magic reset
-  opcode has been found in the ten-command space. Whether the GUI's Restore
-  button implements this template re-apply is the open tracing question.
-- **Harsh test:** can recovery be done by this user without Windows and
-  without vendor tooling? Requires the known-good blob (#11) plus a physical
-  recovery route (DFU via button hold during power-up, test pad).
-- **No purchase:** a spare/sibling mouse (`BY24G` family) remains the cheapest
-  risk reduction, but is a purchasing decision and is **out of scope** here.
+- **Candidate escape hatch:** a known-good config blob captured from a
+  healthy mouse, re-applied through the vendor app's `Apply_24G` write path
+  (general block, PSD `0x92`, macro `0x30`, key matrix `0x12`/`0x22`/`0x32`).
+  No magic "reset to factory" opcode appears in the vendor app's ten-command
+  surface (`0x01`, `0x11`/`0x21`/`0x31`, `0x12`/`0x22`/`0x32`, `0x30`, `0x90`,
+  `0x92`; the confirmed device command `0x02` sits outside that table). The
+  Restore/Reset control itself has not been traced, so the reset opcode is
+  expected to be absent but not proven. Re-applying a blob is still an
+  untested write path and is gated on #11.
+- **Recovery must work without Windows.** That is the test that matters:
+  recovery which needs the vendor's Windows tooling is not recovery for this
+  project. No route has been validated, so the honest answer today is **no**.
+- **Physical recovery is still unknown.** The manual and Redragon's support
+  pages have not been checked. Candidate routes to investigate — DFU via a
+  button held during power-up, or a board test pad — are unverified for this
+  model; this is a lookup task, not a hardware result.
+- **Device owner: not named.** A spare or sibling `BY24G` device remains the
+  cheapest risk reduction. That is a purchasing decision, not a technical
+  result, and it is still open.
 
 ## Risk notes
 

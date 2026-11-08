@@ -364,7 +364,11 @@ Still open:
    not fully decoded.
 2. **Whether a defaults-restore exists on the wire.** The GUI has a
    `Restore` / `Reset` button (`tc_restore`, `tc_reset`, `tc_msg5`), but the
-   command behind it was not traced. Do not assume an escape hatch.
+   command behind it was not traced. Do not assume an escape hatch. #9
+   reframed this: no reset opcode appears in the vendor app's command
+   surface, and the candidate escape hatch is a known-good blob re-applied
+   through the write path, gated on #11. See
+   [GUI-ANALYSIS.md](GUI-ANALYSIS.md#recovery).
 3. **The 520-byte blob field layout.** The general block is **mapped end to
    end** (#6): `[0x08..0x99]`, 146 bytes, every offset accounted for. Nothing in
    `[0x9a..0x207]` is carried by this command — `SetGeneral` memcpys exactly
