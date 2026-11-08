@@ -874,6 +874,11 @@ Stated plainly, because these matter for anyone considering writes.
    restore?"), but its protocol command was **not** traced. Whether a
    defaults-restore exists on the wire is unknown. Do not assume an escape
    hatch until this is confirmed.
+
+   **#9 reframed this.** See [Recovery](#recovery) below: no magic reset
+   opcode appears in the vendor app's command surface, so the candidate
+   escape hatch is a known-good blob on disk (#11), not a protocol feature.
+   The Restore tracing question itself is still open.
 3. The field layout of the 520-byte config blob. The **general block is now
    mapped end to end**: `[0x08..0x99]`, 146 bytes, every offset accounted for
    including the two that were misread before (`[0x0a]` is the report rate, not
@@ -904,6 +909,30 @@ Stated plainly, because these matter for anyone considering writes.
    needs the gated write path.
 5. The meaning of the special FunIDs `0x5b`/`0x5c` and the `0xf0`–`0xfa`
    group.
+
+## Recovery
+
+**#9 tracks this; the recovery path is not established yet.**
+
+- **Candidate escape hatch:** a known-good config blob captured from a
+  healthy mouse, re-applied through the vendor app's `Apply_24G` write path
+  (general block, PSD `0x92`, macro `0x30`, key matrix `0x12`/`0x22`/`0x32`).
+  No magic "reset to factory" opcode appears in the vendor app's ten-command
+  surface (`0x01`, `0x11`/`0x21`/`0x31`, `0x12`/`0x22`/`0x32`, `0x30`, `0x90`,
+  `0x92`; the confirmed device command `0x02` sits outside that table). The
+  Restore/Reset control itself has not been traced, so the reset opcode is
+  expected to be absent but not proven. Re-applying a blob is still an
+  untested write path and is gated on #11.
+- **Recovery must work without Windows.** That is the test that matters:
+  recovery which needs the vendor's Windows tooling is not recovery for this
+  project. No route has been validated, so the honest answer today is **no**.
+- **Physical recovery is still unknown.** The manual and Redragon's support
+  pages have not been checked. Candidate routes to investigate — DFU via a
+  button held during power-up, or a board test pad — are unverified for this
+  model; this is a lookup task, not a hardware result.
+- **Device owner: not named.** A spare or sibling `BY24G` device remains the
+  cheapest risk reduction. That is a purchasing decision, not a technical
+  result, and it is still open.
 
 ## Risk notes
 
