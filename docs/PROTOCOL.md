@@ -176,6 +176,17 @@ polling rate and macros are all reached through `0x11/0x21/0x31` (the 520-
 byte config blob) plus `0x12/0x22/0x32` (the key matrix) — there is no
 per-setting command at all.
 
+### FunIDs on the write path
+
+The write commands `0x12`/`0x22`/`0x32` take a key matrix, and every matrix
+entry names a function ID through the builder's case dispatch (#8): FunID −
+`0x10` indexes the 235-byte case table at `0x40b284`, whose entries index the
+16-entry jump table at `0x40b244`. The human-readable mapping of FunID →
+action lives in [GUI-ANALYSIS.md](GUI-ANALYSIS.md#key--button-model); the
+hardware family is `0xf0`–`0xfa` (physical buttons, scroll and macro events),
+not a keyboard usage page. When a write is finally implemented, every entry
+sent through `0x12`/`0x22`/`0x32` should cite its FunID here.
+
 ### Transport, independently confirmed
 
 The app's `SendCmd` builds exactly what `tools/sinowealth.py` already sends:
