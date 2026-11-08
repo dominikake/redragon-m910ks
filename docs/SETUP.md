@@ -10,8 +10,10 @@ owned by root and unreadable by default. One udev rule fixes that.
 | `258a:002f` | Sino Wealth 2.4G wireless receiver (the dongle) |
 | `258a:002e` | Sino Wealth wired gaming mouse (USB-C cable mode) |
 
-Both expose the same vendor HID interface; `002f` is the primary target
-because that is where the battery level lives.
+Both expose the same vendor HID interface and both need the rule. `002f`
+carries the charge level of a wireless mouse; `002e` appears when the USB
+cable is attached, and is the only node that knows the mouse is charging
+(the mouse turns its radio off in wired mode, so the dongle goes silent).
 
 ## Install the rule (permanent, no sudo at runtime)
 

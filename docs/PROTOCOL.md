@@ -243,41 +243,61 @@ Notably **absent** compared to libratbag's wired reference mice: `0x12`
 The command set is genuinely different from the mice libratbag targets --
 it had to be discovered, not copied.
 
-### `0x90` -- the current battery lead
+### `0x90` -- battery and USB-connected state
 
-An otherwise-unexplained command that replies on the short CMD report with
-`10 02 00 00 00 00`. Candidates for the two leading bytes:
-
-- `0x10` = 16 -- could be a battery percentage, a state enum, or a flag
-- `0x02` = 2 -- could be a charging flag, channel/slot, or device index
-
-This has to be settled by **observing it change**, not by reading it once:
-poll `0x90` while plugging in the USB-C cable, unplugging, and toggling
-the power switch. A field that moves with charging state is the battery.
-`tools/watch.py` does exactly this.
-
-## BATTERY FOUND: `cmd 0x90` -- read it from the DONGLE
-
-`cmd 0x90` replies on the short CMD report `0x05`. The reply is 8 bytes:
+The command replies on the short CMD report `0x05` with 8 bytes:
 
 ```
 offset  0     1     2     3     4  5  6  7
         05    90    11    57    00 00 00 00
               |----- cmd echo
-                    |     |------ battery percent (0x57 = 87)
-                    |------------ link type: 0x10 wired / 0x11 wireless
+                    |     |------ nPower: battery percent (0x57 = 87)
+                    |------------ nUsbConnect: 0x10 USB / 0x11 wireless
 ```
+
+The semantics are not inferred from correlation: the vendor app's
+`ReadPower` at `OemDrv.exe` `0x40a590` decodes them explicitly.
+
+```
+40a615  mov al, [esp+0x15]      ; reply byte 2
+40a619  cmp al, 0x10
+40a61b  jne 0x40a649
+40a61d  movzx edx, [esp+0x16]   ; reply byte 3
+40a628  mov dword [ecx], 1      ; *nUsbConnect = 1
+40a62e  mov [ebp+0], edx        ; *nPower      = reply[3]
+...
+40a649  cmp al, 0x11
+40a64d  movzx ecx, [esp+0x16]   ; reply byte 3
+40a657  mov dword [eax], 0      ; *nUsbConnect = 0
+```
+
+Anything other than `0x10`/`0x11` makes the routine return 0 ("no
+reading"), so unknown link codes must not be treated as either state. The
+caller (`0x413ebb`) passes `nPower` first and `nUsbConnect` second to the
+UTF-16 format string `ReadPower: nPower=%d, nUsbConnect=%d` at VA
+`0x59afc8` (file offset `0x19a3c8`).
 
 Observed across devices:
 
 | device | reply[2] | reply[3] | meaning |
 |---|---|---|---|
-| wired `258a:002e` | `0x10` | `0x02` | link = direct USB |
-| dongle `258a:002f` | `0x11` | `0x00` -> `0x57` | link = wireless, **87%** |
+| wired `258a:002e` | `0x10` | `0x01` | USB-connected, **charging, 1%** |
+| dongle `258a:002f` | `0x11` | `0x00` -> `0x57` | wireless, **87%** |
 
-**The battery must be read from the dongle (`258a:002f`).** The wired mouse
-answers `0x90` too, but without wireless status; it is not where the charge
-level lives.
+**Read the wired node while the cable is attached.** The two nodes answer
+the same command but are not interchangeable: with the cable in, the mouse
+turns its radio off, so the dongle replies `0x11` + `0x00` and cannot tell
+charging from a flat battery. Both were captured at the same moment:
+
+```
+/dev/hidraw3 (258a:002e)  05 90 10 01 00 00 00 00   -> USB, 1%
+/dev/hidraw1 (258a:002f)  05 90 11 00 00 00 00 00   -> wireless, nothing
+```
+
+`tools/battery.py` therefore prefers the wired node whenever it enumerates
+and falls back to the dongle. Note that the *same* `reply[3] == 0x00` means
+different things on the two transports: asleep on wireless, "gauge has not
+reported yet" while charging.
 
 ### Sleeping behaviour -- important
 
@@ -286,7 +306,7 @@ value populates a second or two after the device wakes (movement, cable
 insert, button press). A reader must therefore:
 
 - poll on an interval rather than read once,
-- treat `reply[3] == 0x00` as **"unknown / asleep"**, not as "0%",
+- treat wireless `reply[3] == 0x00` as **"unknown / asleep"**, not as "0%",
 - retry until a non-zero value arrives.
 
 ### Status: CONFIRMED
@@ -309,6 +329,7 @@ therefore tracks the age of the last good reading and escalates:
 | 15 min - 6 h | `M?`, age in tooltip | stale, approximate |
 | > 6 h | `M!!` "no signal ... may be flat" | device not reporting |
 | never | `M--` | no reading yet |
+| on USB | `M+ 99%` | charging, age irrelevant |
 
 Thresholds are tunable via `REDRAGON_BATTERY_STALE` and
 `REDRAGON_BATTERY_FLAT` (seconds). A merely *sleeping* mouse does not
@@ -361,11 +382,13 @@ reply.
 
 ## What is NOT known
 
-**The battery field** is settled: `cmd 0x90` reply byte 3 on the dongle,
-confirmed live. The vendor app reads the same command and parses it as
-`ReadPower: nPower=%d, nUsbConnect=%d` -- so reply byte 2 is very likely the
-charging / USB-connected flag that `tools/battery.py` currently leaves as
-`None`. Worth a diff against charging state to confirm.
+**The battery field** is settled: `cmd 0x90` reply byte 3, confirmed live
+and confirmed against the vendor code. Byte 2 is `nUsbConnect` (`0x10`
+wired / `0x11` wireless, anything else = no reading); byte 3 is `nPower` on
+both transports. `tools/battery.py` decodes both, prefers the wired node
+while the cable is attached, and `tools/omarchy_bar_module.py` renders the
+charging state as `M+ <pct>%`. See the `0x90` section above for the
+disassembly.
 
 Still open:
 
@@ -406,8 +429,9 @@ Still open:
 2. **Wireless sleep limits readback.** A 2.4 GHz mouse sleeps when idle and
    may only answer the receiver when recently moved. The RE guide notes you
    must poll every ~250-300 ms to wake the link. A battery indicator may
-   therefore be "best effort, possibly stale" rather than live. Using USB-C
-   wired mode for protocol discovery sidesteps this.
+   therefore be "best effort, possibly stale" rather than live. The USB
+   cable sidesteps this entirely: the wired node answers while idle, and is
+   the only transport that knows the mouse is charging.
 
 ## Environment notes
 
@@ -423,17 +447,14 @@ Still open:
 ## Suggested order of work
 
 Steps 1-4 are done. The vendor app has been unpacked and its command table
-extracted -- see [GUI-ANALYSIS.md](GUI-ANALYSIS.md). Remaining work, in
-order of value:
+extracted -- see [GUI-ANALYSIS.md](GUI-ANALYSIS.md). The battery, including
+the charging flag, is settled. Remaining work, in order of value:
 
 1. **Decode the bulk-data routines** at `0x40b750` / `0x40b9f0`, which
    build the "general" block that `Apply_24G` writes. This closes most of
    the 520-byte layout and is pure static analysis -- zero hardware risk.
    A real decompiler (`GHIDRA_INSTALL_DIR`) would make this routine work.
-2. **Diff `cmd 0x90` reply byte 2 against charging state** to confirm it is
-   `nUsbConnect`, then fill in `tools/battery.py`'s `charging` field.
-   Read-only, one cable insert.
-3. **Trace the GUI's Restore button** to find out whether a defaults-reset
+2. **Trace the GUI's Restore button** to find out whether a defaults-reset
    exists on the wire. Worth knowing before any write, not after.
-4. Only then consider writing DPI / lighting from Linux -- see the risk
+3. Only then consider writing DPI / lighting from Linux -- see the risk
    notes in GUI-ANALYSIS.md.

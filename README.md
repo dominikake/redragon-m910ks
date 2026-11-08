@@ -16,14 +16,36 @@ Battery reading (reverse-engineered and **confirmed** in live use):
 ```
 SET_FEATURE(report 0x05, [0x05, 0x90, 0, 0, 0, 0])
 GET_FEATURE(report 0x05, 8)
-  -> [2] = link type (0x10 wired / 0x11 wireless)
-     [3] = battery percent, 0x00 while the mouse sleeps
+  -> [2] = nUsbConnect (0x10 USB/wired, 0x11 wireless)
+     [3] = battery percent, 0x00 while the wireless link has nothing to say
 ```
 
-The charge level lives on the **2.4 GHz dongle**, not the wired mouse.
-Observed `0x57` = 87%, and the bar was seen going 100% -> 99% in normal use.
+The command answers on **both** transports, and they mean different things:
+
+| node | when it is the source | reports |
+|---|---|---|
+| dongle `258a:002f` | mouse on 2.4 GHz | charge level of the wireless mouse |
+| cable `258a:002e` | USB cable attached | charge level **and** that it is charging |
+
+While the cable is in, the mouse turns its radio off, so the dongle answers
+`0x11` + `0x00` ("asleep") no matter what the charge is. The wired node is
+the only honest source then, and the reader prefers it whenever it
+enumerates. Observed `0x57` = 87%, and the bar was seen going 100% -> 99% in
+normal use.
 
 Standard library only — no pip, pyusb, or hidapi.
+
+## Charging
+
+Plugged in, the bar shows `M+ 1%` (class `charging`) instead of a stale
+wireless number, and it never says "may be flat" while the cable is
+attached. If the gauge has not reported yet it shows `M+` with a tooltip
+saying so; at 100% the tooltip says "charged, still on USB".
+
+The USB-connected flag is not a guess: the vendor app's own `ReadPower`
+(`OemDrv.exe` `0x40a590`) maps reply byte 2 to `nUsbConnect` (`0x10` -> 1,
+`0x11` -> 0, anything else -> failure) and copies byte 3 into `nPower` in
+both branches. See `docs/GUI-ANALYSIS.md`.
 
 ## Staleness (why a dead mouse won't lie)
 
@@ -37,6 +59,7 @@ with the age of the last live reading:
 | 15 min – 6 h | `M?` + age in tooltip | stale, approximate |
 | > 6 h | `M!!` "no signal … may be flat" | not reporting |
 | never | `M--` | no reading yet |
+| on USB | `M+ 99%` | charging (age is irrelevant) |
 
 Tune with `REDRAGON_BATTERY_STALE` / `REDRAGON_BATTERY_FLAT` (seconds).
 A *sleeping* mouse never triggers this -- only the passage of time does.
@@ -71,7 +94,8 @@ sudo python3 -B tools/confirm.py --seconds 300 --every 10 --log captures/battery
 Already wired into `~/.config/omarchy/shell.json` as a `type: "command"`
 module running `~/.config/omarchy/bar/scripts/omarchy_bar_module.py`
 (refreshes every 60s, click re-reads). It shows a mouse glyph plus percent,
-greyed when asleep. Restore the previous bar with:
+`M+` while charging on USB, and is greyed when asleep. Restore the previous
+bar with:
 `cp ~/.config/omarchy/shell.json.bak-battery ~/.config/omarchy/shell.json`.
 
 ## Background refresh (systemd timer)
@@ -109,7 +133,7 @@ cat "$XDG_RUNTIME_DIR/redragon-m910ks-battery.txt"
 |---|---|
 | `tools/sinowealth.py` | Minimal HID transport. Standard library only. |
 | `tools/safety.py` | **Read-only policy.** Refuses writes; makes `0x75` unreachable. Self-check: `python3 tools/safety.py`. |
-| `tools/battery.py` | **Main reader.** Charge % from the dongle via cmd `0x90`. |
+| `tools/battery.py` | **Main reader.** Charge % via cmd `0x90`, from the cable when attached, else the dongle. |
 | `tools/history.py` | Persistent reading history + staleness tracking. |
 | `tools/plot.py` | Render the discharge curve / CSV export from history. |
 | `tools/confirm.py` | Timestamped sampling harness. |
@@ -138,7 +162,8 @@ cat "$XDG_RUNTIME_DIR/redragon-m910ks-battery.txt"
   ([`docs/GUI-ANALYSIS.md`](docs/GUI-ANALYSIS.md)) and the write half is
   deliberately unused.
 - **Sleep-aware.** The mouse sleeps when idle and returns `0x00`; every
-  consumer treats that as *unknown*, never as *0%*.
+  consumer treats that as *unknown*, never as *0%*. On the cable the same
+  `0x00` means "charging, level not reported yet" -- still not 0%.
 
 ### Safety policy
 
@@ -180,6 +205,7 @@ on Windows (#9) — not merely a successful read.
 - [x] Enumerate the command space (`0x01`,`0x02`,`0x11`,`0x21`,`0x90`)
 - [x] **Locate battery: cmd `0x90`, byte 3, on the dongle**
 - [x] Confirm reading live (observed 100% -> 99% in normal use)
+- [x] **Charging state from the wired node** — `nUsbConnect`, `0x40a590`
 - [x] Omarchy bar indicator + UPower bridge built
 - [x] Stale/flat detection so a dead mouse never shows a frozen percent
 - [x] Persistent history + discharge-curve plotter
