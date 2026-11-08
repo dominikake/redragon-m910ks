@@ -396,12 +396,12 @@ Still open:
    whether a malformed write is a harmless scare or a dead mouse. No
    firmware image ships with the installer and the bulk-data routines were
    not fully decoded.
-2. **Whether a defaults-restore exists on the wire.** The GUI has a
-   `Restore` / `Reset` button (`tc_restore`, `tc_reset`, `tc_msg5`), but the
-   command behind it was not traced. Do not assume an escape hatch. #9
-   reframed this: no reset opcode appears in the vendor app's command
-   surface, and the candidate escape hatch is a known-good blob re-applied
-   through the write path, gated on #11. See
+2. **Whether a defaults-restore exists on the wire.** The `Restore` control
+   has now been traced: it does not send a reset opcode. It installs a
+   host-side template into the in-memory profile and then runs the ordinary
+   apply path; the final wire write is inferred, not observed. The `Reset`
+   control was not separately identified. The candidate escape hatch remains
+   a known-good blob re-applied through the write path, gated on #11. See
    [GUI-ANALYSIS.md](GUI-ANALYSIS.md#recovery).
 3. **The 520-byte blob field layout.** The general block is **mapped end to
    end** (#6): `[0x08..0x99]`, 146 bytes, every offset accounted for. Nothing in

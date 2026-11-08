@@ -884,14 +884,13 @@ Stated plainly, because these matter for anyone considering writes.
    open question.**
 2. **There is a `Restore` / `Reset` button in the UI**
    (`tc_restore`, `tc_reset`, `tc_msg5` "Are you sure you want to
-   restore?"), but its protocol command was **not** traced. Whether a
-   defaults-restore exists on the wire is unknown. Do not assume an escape
-   hatch until this is confirmed.
-
-   **#9 reframed this.** See [Recovery](#recovery) below: no magic reset
-   opcode appears in the vendor app's command surface, so the candidate
-   escape hatch is a known-good blob on disk (#11), not a protocol feature.
-   The Restore tracing question itself is still open.
+   restore?"). The `Restore` control **has now been traced**: it does not
+   send a reset opcode. It installs a host-side template into the in-memory
+   profile, refreshes the UI, then enters the normal progress/apply path.
+   See [Recovery](#recovery) for the addresses and for the one step that is
+   still inferred rather than observed (the final wire write). The `Reset`
+   control was not separately identified in this pass, so its behaviour is
+   still unknown.
 3. The field layout of the 520-byte config blob. The **general block is now
    mapped end to end**: `[0x08..0x99]`, 146 bytes, every offset accounted for
    including the two that were misread before (`[0x0a]` is the report rate, not
@@ -925,24 +924,59 @@ Stated plainly, because these matter for anyone considering writes.
 
 ## Recovery
 
-**#9 tracks this; the recovery path is not established yet.**
+**#9 tracks this. The `Restore` control is now traced; a Windows-free
+recovery route is still not established.**
+
+### The `Restore` control is a template re-apply, not a command
+
+The control labelled `tc_restore` is `COemDrvDlg`'s member at `this+0x158c`.
+Its caption is set from `0x5e4be8` at `0x431ac9`, and its click handler is the
+branch at `0x432cf1` in the dialog's command dispatcher. On a click the
+handler:
+
+1. shows `tc_msg5` ("Are you sure you want to restore?") through the modal
+   dialog helper at `0x444d58`;
+2. on confirm, loads the current profile object (`0x5e4908`) and calls
+   `0x441080`, which overwrites three `0x280`-byte arrays in the profile
+   (`+0x264`, `+0x4e4`, `+0x764`) by copying the host-side template staged at
+   `0x5e3ad0`, `0x5e3d50` and `0x5e3fd0` (`rep movsl`, `0xa0` dwords each);
+3. calls `0x433260` to refresh the three tab pages; and
+4. enters the normal "please wait" progress path.
+
+The same template install (`0x441080`) is used by the new-profile path
+(`0x441120`), so this is the app's default profile template, not a device
+command. **No reset opcode is constructed by the handler.** The recovered
+command surface is still the ten commands plus the confirmed `0x02`, and none
+of them is a "reset to factory" opcode.
+
+One step remains inferred rather than observed: the transition from the
+progress dialog to the actual wire write. `Apply_24G` (`0x40bd60`) is reached
+through an indirect function-pointer table (`0x5a1a7c`), so the absence of a
+direct call inside the handler is not proof that no write happens. The
+defensible reading is that `Restore` re-applies the host-side template
+through the ordinary apply path, not through a dedicated command.
+
+The `Reset` control was not separately identified in this pass.
+
+### What this means for recovery
 
 - **Candidate escape hatch:** a known-good config blob captured from a
-  healthy mouse, re-applied through the vendor app's `Apply_24G` write path
-  (general block, PSD `0x92`, macro `0x30`, key matrix `0x12`/`0x22`/`0x32`).
-  No magic "reset to factory" opcode appears in the vendor app's ten-command
-  surface (`0x01`, `0x11`/`0x21`/`0x31`, `0x12`/`0x22`/`0x32`, `0x30`, `0x90`,
-  `0x92`; the confirmed device command `0x02` sits outside that table). The
-  Restore/Reset control itself has not been traced, so the reset opcode is
-  expected to be absent but not proven. Re-applying a blob is still an
-  untested write path and is gated on #11.
+  healthy mouse, re-applied through `Apply_24G` (general block, PSD `0x92`,
+  macro `0x30`, key matrix `0x12`/`0x22`/`0x32`). Re-applying a blob is still
+  an untested write path and is gated on #11.
+- **The vendor GUI's Restore button is not an independent escape hatch.** It
+  restores the app's own default template. It has no privileged path that a
+  Linux reimplementation lacks, and it still depends on the device accepting
+  the ordinary writes.
 - **Recovery must work without Windows.** That is the test that matters:
   recovery which needs the vendor's Windows tooling is not recovery for this
   project. No route has been validated, so the honest answer today is **no**.
-- **Physical recovery is still unknown.** The manual and Redragon's support
-  pages have not been checked. Candidate routes to investigate — DFU via a
-  button held during power-up, or a board test pad — are unverified for this
-  model; this is a lookup task, not a hardware result.
+- **Physical recovery is unverified.** Redragon's official download page for
+  this model lists only the Windows software — no firmware image, DFU tool or
+  recovery utility. The published manual could not be read in this pass (the
+  manual mirrors returned 403 / bot checks), so no DFU or button-hold
+  procedure has been confirmed. Candidate routes — DFU via a button held
+  during power-up, or a board test pad — remain **unverified** for this model.
 - **Device owner: not named.** A spare or sibling `BY24G` device remains the
   cheapest risk reduction. That is a purchasing decision, not a technical
   result, and it is still open.
