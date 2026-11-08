@@ -49,16 +49,8 @@ except ImportError:
 
 
 def current_reading():
-    from battery import find_dongle_vendor_node, read_once
-    from sinowealth import SinoWealthDevice, HidError
-    node = find_dongle_vendor_node()
-    if node is None:
-        return {"state": "no-dongle", "percent": None}
-    try:
-        with SinoWealthDevice(node) as dev:
-            return read_once(dev)
-    except HidError as exc:
-        return {"state": f"error: {exc}", "percent": None}
+    from battery import read_battery
+    return read_battery()
 
 
 def write_state_file(info: dict) -> None:
@@ -66,7 +58,7 @@ def write_state_file(info: dict) -> None:
     body = (f"{pct}\n" if pct is not None and info.get("state") == "ok"
             else "\n")
     body += f"# state={info.get('state')} link={info.get('link', '-')} " \
-            f"raw={info.get('raw', '')}\n"
+            f"charging={info.get('charging')} raw={info.get('raw', '')}\n"
     try:
         tmp = STATE_FILE + f".{os.getpid()}"
         with open(tmp, "w") as fh:
@@ -74,6 +66,24 @@ def write_state_file(info: dict) -> None:
         os.replace(tmp, STATE_FILE)
     except OSError:
         pass
+
+
+# UPower's State enum, as far as this bridge needs it.
+STATE_UNKNOWN = 0
+STATE_CHARGING = 1
+STATE_DISCHARGING = 2
+STATE_FULLY_CHARGED = 4
+
+
+def upower_state(info: dict) -> int:
+    pct = info.get("percent")
+    if info.get("charging"):
+        if pct is not None and pct >= 100:
+            return STATE_FULLY_CHARGED
+        return STATE_CHARGING
+    if pct is None:
+        return STATE_UNKNOWN
+    return STATE_DISCHARGING
 
 
 if HAVE_DBUS:
@@ -95,6 +105,15 @@ if HAVE_DBUS:
             self.refresh()
             pct = self.info.get("percent")
             return 100 if pct is None else int(pct)
+
+        @dbus.service.method(IFACE, in_signature="", out_signature="u")
+        def GetState(self):
+            self.refresh()
+            return upower_state(self.info)
+
+        @dbus.service.method(IFACE, in_signature="", out_signature="b")
+        def GetIsRechargeable(self):
+            return True
 
         def refresh(self):
             self.info = current_reading()

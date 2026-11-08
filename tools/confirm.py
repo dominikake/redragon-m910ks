@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from battery import (  # noqa: E402
     find_dongle_vendor_node,
+    find_wired_vendor_node,
     read_once,
 )
 from sinowealth import HidError, SinoWealthDevice, enumerate_nodes  # noqa: E402
@@ -46,9 +47,11 @@ def now_iso() -> str:
 
 def fmt(info: dict) -> str:
     pct = info.get("percent")
-    pct_s = f"{pct:3d}" if pct is not None and info.get("state") == "ok" else "  -"
+    pct_s = f"{pct:3d}" if pct is not None else "  -"
     link = info.get("link", "-") if info.get("link_code") else "-"
-    return (f"{now_iso()}  {pct_s}%  link={link:<16} "
+    charging = info.get("charging")
+    chg = "yes" if charging else ("no" if charging is False else "-")
+    return (f"{now_iso()}  {pct_s}%  link={link:<16} charging={chg:<3} "
             f"raw={info.get('raw', '')}")
 
 
@@ -93,6 +96,9 @@ def collect(node: str, seconds: float, every: float, log_path: str | None):
     print(f"  readings : {len(pcts)}/{len(samples)}")
     print(f"  min/max  : {min(pcts)}% / {max(pcts)}%")
     print(f"  distinct : {sorted(set(pcts))}")
+    charging = sum(1 for s in samples if s.get("charging"))
+    if charging:
+        print(f"  charging : {charging}/{len(samples)} samples")
     if len(set(pcts)) <= 1:
         print("\n  VERDICT: value never changed -> NOT yet evidence of a "
               "battery.\n  Change the charging state and re-run.")
@@ -115,9 +121,13 @@ def compare() -> int:
             rows.append((label, node, info))
             print(f"  {label:6s} {node}: {fmt(info)}")
     print()
+    wired = [i for _, _, i in rows if i.get("charging")]
     wireless = [i for _, _, i in rows if i.get("link_code") == 0x11]
-    if wireless and any(i.get("state") == "ok" for i in wireless):
-        print("  dongle reports a live level -> this is the battery source.")
+    if wired and any(i.get("state") in ("ok", "pending") for i in wired):
+        print("  wired node answers -> mouse is on USB and charging.")
+        print("  this is the source used while the cable is attached.")
+    elif wireless and any(i.get("state") == "ok" for i in wireless):
+        print("  dongle reports a live level -> wireless is the source.")
     else:
         print("  dongle currently asleep -> move the mouse and re-run.")
     return 0
@@ -136,9 +146,10 @@ def main() -> int:
         return compare()
 
     node = f"/dev/hidraw{args.node}" if args.node is not None \
-        else find_dongle_vendor_node()
+        else (find_wired_vendor_node() or find_dongle_vendor_node())
     if node is None:
-        print("dongle (258a:002f) not found", file=sys.stderr)
+        print("no device found (neither 258a:002e nor 258a:002f)",
+              file=sys.stderr)
         return 2
     return collect(node, args.seconds, args.every, args.log)
 

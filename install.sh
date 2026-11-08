@@ -30,7 +30,8 @@ fi
 
 echo "==> installing tools to $DEST"
 mkdir -p "$DEST"
-cp "$REPO"/tools/{sinowealth,history,battery,plot,confirm}.py "$DEST/"
+# safety.py is imported by sinowealth.py on every send, so it is not optional.
+cp "$REPO"/tools/{sinowealth,safety,history,battery,plot,confirm}.py "$DEST/"
 chmod +x "$DEST"/*.py
 
 echo "==> installing systemd user units"

@@ -51,7 +51,8 @@ def _ensure_dir() -> None:
     os.makedirs(STATE_DIR, exist_ok=True)
 
 
-def record(percent: int, link: str | None = None, raw: str = "") -> None:
+def record(percent: int, link: str | None = None, raw: str = "",
+           charging: bool | None = None) -> None:
     """Append a successful reading and refresh the last-good marker."""
     _ensure_dir()
     ts = _now()
@@ -60,6 +61,7 @@ def record(percent: int, link: str | None = None, raw: str = "") -> None:
         "iso": _iso(ts),
         "percent": percent,
         "link": link,
+        "charging": charging,
         "raw": raw,
     }
     try:
@@ -118,14 +120,14 @@ def staleness() -> dict:
     """
     Describe how much to trust the last recorded reading.
 
-    Returns keys: status, percent, age, iso, link.
+    Returns keys: status, percent, age, iso, link, charging.
     status is one of fresh | stale | flat | unseen.
     """
     last = last_good()
     age = age_of(last)
     if last is None or age is None:
         return {"status": "unseen", "percent": None, "age": None,
-                "iso": None, "link": None}
+                "iso": None, "link": None, "charging": None}
     if age <= STALE_AFTER:
         status = "fresh"
     elif age <= FLAT_AFTER:
@@ -138,6 +140,7 @@ def staleness() -> dict:
         "age": age,
         "iso": last.get("iso"),
         "link": last.get("link"),
+        "charging": last.get("charging"),
     }
 
 

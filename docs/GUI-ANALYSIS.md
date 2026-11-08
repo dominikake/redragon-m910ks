@@ -663,9 +663,22 @@ scrolling speed, scroll one page, improve pointer precision, USB polling
 rate, brightness, LED effect, LOGO effect, speed, colour, predefined colour,
 RGB value, DPI effect.
 
-**Battery** — `ReadPower: nPower=%d, nUsbConnect=%d` confirms `cmd 0x90`
-returns charge **and** a USB-connected flag. `nUsbConnect` is very likely
-the charging indicator the tool currently leaves as `None`.
+**Battery** — `ReadPower: nPower=%d, nUsbConnect=%d` is confirmed, not
+inferred. `ReadPower` at `0x40a590` reads reply byte 2, writes `1` into
+`nUsbConnect` when it is `0x10` and `0` when it is `0x11`, and copies reply
+byte 3 into `nPower` in both branches; any other byte 2 value returns
+failure. The caller at `0x413ebb` passes `nPower` first and `nUsbConnect`
+second to the UTF-16 format string at VA `0x59afc8` (file offset
+`0x19a3c8`). Live capture with the cable attached agrees:
+
+```
+wired  258a:002e  05 90 10 01 ...  -> nUsbConnect=1, nPower=1
+dongle 258a:002f  05 90 11 00 ...  -> nUsbConnect=0, no wireless reading
+```
+
+`tools/battery.py` now decodes both fields and prefers the wired node while
+the cable is attached, because the dongle cannot distinguish charging from a
+flat battery once the mouse's radio is off.
 
 ## Live validation
 

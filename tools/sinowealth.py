@@ -79,7 +79,10 @@ def _ioc(direction: int, typ: str, nr: int, size: int) -> int:
 HID_MAX_DESCRIPTOR_SIZE = 4096
 
 HIDIOCGRDESCSIZE = _ioc(_IOC_READ, "H", 0x01, 4)
-HIDIOCGRDESC = _ioc(_IOC_READ, "H", 0x02, HID_MAX_DESCRIPTOR_SIZE)
+# HIDIOCGRDESC takes a struct hidraw_report_descriptor: a u32 length followed
+# by HID_MAX_DESCRIPTOR_SIZE bytes of descriptor. The size encoded in the
+# ioctl number is that whole struct (4 + 4096), not just the descriptor.
+HIDIOCGRDESC = _ioc(_IOC_READ, "H", 0x02, 4 + HID_MAX_DESCRIPTOR_SIZE)
 HIDIOCGFEATURE = _ioc(_IOC_READ | _IOC_WRITE, "H", 0x07, HID_MAX_DESCRIPTOR_SIZE)
 HIDIOCSFEATURE = _ioc(_IOC_READ | _IOC_WRITE, "H", 0x06, HID_MAX_DESCRIPTOR_SIZE)
 
@@ -182,12 +185,19 @@ class SinoWealthDevice:
     # -- introspection -----------------------------------------------------
     def get_report_descriptor(self) -> bytes:
         # Two-step, as hidapi does: ask the size, then fetch exactly that.
-        size = fcntl.ioctl(self._fd, HIDIOCGRDESCSIZE, 0)
-        size = int(size) if not isinstance(size, int) else size
+        # The reply is struct hidraw_report_descriptor { u32 size; u8 value[] },
+        # so the buffer has to be 4 bytes larger than the descriptor itself.
+        # Handing the kernel a bare descriptor buffer makes it return EFAULT.
+        size_buf = bytearray(4)
+        fcntl.ioctl(self._fd, HIDIOCGRDESCSIZE, size_buf, True)
+        size = struct.unpack_from("<I", size_buf, 0)[0]
         size = max(1, min(size, HID_MAX_DESCRIPTOR_SIZE))
-        buf = bytearray(size)
-        _ioctl_raw(self._fd, _ioc(_IOC_READ, "H", 0x02, size), buf)
-        return bytes(buf)
+        buf = bytearray(4 + HID_MAX_DESCRIPTOR_SIZE)
+        struct.pack_into("<I", buf, 0, size)
+        _ioctl_raw(self._fd, HIDIOCGRDESC, buf)
+        size = struct.unpack_from("<I", buf, 0)[0]
+        size = max(1, min(size, HID_MAX_DESCRIPTOR_SIZE))
+        return bytes(buf[4:4 + size])
 
     def list_report_ids(self) -> list[int]:
         """Report IDs present in this node's descriptor."""
@@ -275,6 +285,12 @@ class SinoWealthDevice:
 
 
 # --- discovery -------------------------------------------------------------
+SYSFS_HIDRAW = "/sys/class/hidraw"
+
+# Usage Page (Vendor Defined 0xFF00) as it appears in a report descriptor.
+VENDOR_USAGE_PAGE = b"\x06\x00\xff"
+
+
 def enumerate_nodes(vendor: str = "258A", product: str = "002F") -> list[tuple[str, str]]:
     """
     Map hidraw nodes belonging to a given USB VID:PID.
@@ -283,7 +299,7 @@ def enumerate_nodes(vendor: str = "258A", product: str = "002F") -> list[tuple[s
     Reads sysfs only; safe to call without permissions.
     """
     found = []
-    for link in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+    for link in sorted(glob.glob(os.path.join(SYSFS_HIDRAW, "hidraw*"))):
         real = os.path.realpath(link)
         m = re.search(r"0003:([0-9A-F]{4}):([0-9A-F]{4})", real)
         if not m:
@@ -293,6 +309,38 @@ def enumerate_nodes(vendor: str = "258A", product: str = "002F") -> list[tuple[s
         node = f"/dev/{os.path.basename(link)}"
         found.append((f"{m.group(1)}:{m.group(2)}", node))
     return found
+
+
+def sysfs_report_descriptor(node: str) -> bytes:
+    """
+    Report descriptor for a hidraw node, straight out of sysfs.
+
+    This is world-readable, so node discovery never has to open the device or
+    send an ioctl. Returns b"" when the kernel does not expose it.
+    """
+    path = os.path.join(SYSFS_HIDRAW, os.path.basename(node), "device",
+                        "report_descriptor")
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return b""
+
+
+def enumerate_vendor_nodes(vendor: str = "258A",
+                           product: str = "002F") -> list[tuple[str, str]]:
+    """
+    Vendor-channel nodes (usage page 0xFF00) for a given USB VID:PID.
+
+    A Sino Wealth device exposes two HID interfaces: the boot mouse and the
+    vendor control channel. Only the latter answers report 0x05, so picking it
+    by descriptor beats picking by sort order. Falls back to every matching
+    node when sysfs has no descriptors, so callers can still try them.
+    """
+    nodes = enumerate_nodes(vendor, product)
+    vendor_nodes = [(hid_id, node) for hid_id, node in nodes
+                    if VENDOR_USAGE_PAGE in sysfs_report_descriptor(node)]
+    return vendor_nodes or nodes
 
 
 def hexdump(data: bytes, width: int = 16) -> str:
